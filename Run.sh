@@ -33,7 +33,7 @@ toilet -f mono12 -F border HE | lolcat
 echo -e "\e[4;34mThis Tool Is Created By HackElite \e[0m" #underline+blue
 echo -e "\e[1;34mFor Any Queries Mail Us!!!\e[0m"
 echo -e "\e[1;32m        Mail: hackelite.sup@gmail.com \e[0m" #yellow
-echo -e "\e[4;32mYouTube Page: https://youtube.com/c/HackElite/ \e[0m" #green
+echo -e "\e[4;32mYouTube Page: https://youtube.com/channel/UCctC7DrSBTHcc8R-BrB9qRg \e[0m" #green
 echo -e "\e[1;34m    Telegram: https://t.me/hackelite01 \e[0m"
 echo " "
 echo -e "\e[4;31mRead Instruction Carefully !!! \e[0m" #red
@@ -98,7 +98,7 @@ echo -e "\e[1;32m                   Contributors\e[1;33m"
 echo -e "\e[1;33m      [*]  HackElite   \e[1;31m"
 echo "         [-] Mail At: hackelite.sup@gmail.com"
 echo -e "\e[1;33m      [*]  YouTube   \e[1;31m"
-echo "         [-] Ping At: http://YouTube.com/c/HackElite"
+echo "         [-] Ping At: https://youtube.com/channel/UCctC7DrSBTHcc8R-BrB9qRg"
 echo -e "\e[1;33m      [*]  Telegram   \e[1;31m"
 echo "         [-] Ping At: https://t.me/hackelite01/"
 echo ""
@@ -112,7 +112,7 @@ echo  " "
 echo -e "\e[4;31m That's All !!!\e[0m"
 echo -e "\e[1;34m For Any Queries Mail Us!!!\e[0m"
 echo -e "\e[1;32m        Mail: hackelite.sup@gmail.com \e[0m"
-echo -e "\e[4;32mYouTube Page: https://www.youtube.com/c/HackElite \e[0m"
+echo -e "\e[4;32mYouTube Page: https://youtube.com/channel/UCctC7DrSBTHcc8R-BrB9qRg \e[0m"
 echo "Press Enter To Return To Main Menu"
 read a3
 clear
@@ -125,7 +125,7 @@ toilet -f pagga -F border HackElite | lolcat
 echo -e "\e[1;34m For Any Queries Mail Us!!!\e[0m"
 echo -e "\e[1;32m        Mail: hackelite.sup@gmail.com \e[0m"
 echo -e "\e[1;32m    Telegram: https://t.me/hackelite01 \e[0m"
-echo -e "\e[4;32mYouTube Page: https://www.youtube.com/c/HackElite/ \e[0m"
+echo -e "\e[4;32mYouTube Page: https://youtube.com/channel/UCctC7DrSBTHcc8R-BrB9qRg \e[0m"
 echo " "
 exit 0
 else
