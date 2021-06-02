@@ -94,8 +94,8 @@ Feel Free To Open An Issue...
 
 ```
                  Mail: hackelite.sup@gmail.com
-      YouTube Channel: https://www.youtube.com/c/HackElite
+      YouTube Channel: https://youtube.com/channel/UCctC7DrSBTHcc8R-BrB9qRg
 ```
 
-<a href="https://www.youtube.com/c/HackElite">Check Out Our YouTube Channel</a><br>
+<a href="https://youtube.com/channel/UCctC7DrSBTHcc8R-BrB9qRg">Check Out Our YouTube Channel</a><br>
 <a href="https://t.me/hackelite01">Check Out Our Telegram Discussion</a>
