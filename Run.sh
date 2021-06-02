@@ -4,10 +4,10 @@ clear
 echo -e "\e[4;31m  HackElite !!! \e[0m"
 echo -e "\e[1;32m Presents \e[0m"
 echo -e "\e[1;34m"
-figlet -f slant Anon-SMS
+figlet -f slant Anony-MSG
 echo "Press Enter To Launch"
 read a1
-if [[ -s update.pandahackers ]];then
+if [[ -s update.hackelite ]];then
 echo "All Requirements Found...."
 else
 echo 'Installing Requirements....'
