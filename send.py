@@ -146,7 +146,7 @@ elif type == 0:
 		})
 		
 		print(resp.json())
-		input('\n\n\nThank You For Using Anon-SMS\nAfter v1.45 There are Ads Enabled in this Tool.\nPress Enter To Continue to VieW Our Channel.\n\Join The Channel And Share Plz.')
+		input('\n\n\nThank You For Using Anony-Msg\nAfter v1.45 There are Ads Enabled in this Tool.\nPress Enter To Continue to VieW Our Channel.\n\Join The Channel And Share Plz.')
 		os.system('xdg-open https://t.me/hackelite01')
 		print("Thank you for Your Time...")
 		break
