@@ -83,7 +83,7 @@ cd Anony-Msg
 sudo bash Run.sh
 ```
 
-##Credits
+## Credits
 
 - **`HACK3RY2J`**
 ## CONTRIBUTORS:
