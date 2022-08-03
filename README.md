@@ -82,6 +82,10 @@ git clone https://github.com/hackelite01/Anony-Msg
 cd Anony-Msg
 sudo bash Run.sh
 ```
+
+##Credits
+
+- **`HACK3RY2J`**
 ## CONTRIBUTORS:
 
 - **HackElite**<br>
