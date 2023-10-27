@@ -28,7 +28,7 @@ function banner() {
 █░██░█▄██▄██▄▄██▄██▄█▀▀▀▄█████░███░█▄▄▄█▄▄▄▄
 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
    echo " "
-   echo -e "$BGreen Hello User... $NC"
+   echo -e "$BGreen Hello Geek... $NC"
    echo -e "$Green   Welcome to Anony-Msg $NC"
    echo -e "$Green     With Anony-Msg You can send, Anonymous Text Message $NC"
    sleep 1
@@ -72,7 +72,7 @@ function SENDSMS() {
    read SMS
 
 
-   SMSRESULT=$(curl -# -X POST https://textbelt.com/text --data-urlencode phone="$PHONE" --data-urlencode message="$SMS" -d key=textbelt)
+   SMSRESULT=$(curl -# -X POST https://APISOON.com/text --data-urlencode phone="$PHONE" --data-urlencode message="$SMS" -d key=textbelt)
    
    if grep -q true <<<"$SMSRESULT"
    
