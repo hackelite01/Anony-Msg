@@ -17,6 +17,7 @@ from telegram import (
 )
 
 import config
+from services.ton import fmt_ton
 
 # Button labels (also used as MessageHandler regex matches)
 BTN_SEND = "📤 Send SMS"
@@ -86,11 +87,18 @@ def back_to_menu() -> InlineKeyboardMarkup:
     )
 
 
-def plans_keyboard(plans: list[dict]) -> InlineKeyboardMarkup:
+def _plan_label(p: dict, ton_enabled: bool) -> str:
+    label = f"💎 {p['name']} • {p['sms_limit']} SMS • {p['price_stars']}⭐"
+    if ton_enabled and p.get("price_ton_nano"):
+        label += f" / {fmt_ton(p['price_ton_nano'])} TON"
+    return label
+
+
+def plans_keyboard(plans: list[dict], ton_enabled: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                f"💎 {p['name']} • {p['sms_limit']} SMS • {p['price_stars']}⭐",
+                _plan_label(p, ton_enabled),
                 callback_data=f"buy:{p['_id']}",
             )
         ]
@@ -98,6 +106,36 @@ def plans_keyboard(plans: list[dict]) -> InlineKeyboardMarkup:
     ]
     rows.append([InlineKeyboardButton("⬅️  Cancel", callback_data="menu:home")])
     return InlineKeyboardMarkup(rows)
+
+
+def payment_methods(plan: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"⭐  Pay {plan['price_stars']} Stars",
+                    callback_data=f"pay:stars:{plan['_id']}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"💎  Pay {fmt_ton(plan['price_ton_nano'])} TON",
+                    callback_data=f"pay:ton:{plan['_id']}",
+                )
+            ],
+            [InlineKeyboardButton("⬅️  Back", callback_data="menu:buy")],
+        ]
+    )
+
+
+def ton_order(order_id: str, pay_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("👛  Open in Tonkeeper", url=pay_url)],
+            [InlineKeyboardButton("✅  I've paid — check now", callback_data=f"ton:chk:{order_id}")],
+            [InlineKeyboardButton("❌  Cancel order", callback_data=f"ton:cancel:{order_id}")],
+        ]
+    )
 
 
 def keys_picker(keys: list[dict]) -> InlineKeyboardMarkup:
@@ -188,6 +226,7 @@ def admin_plans_menu() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("📋  List Plans", callback_data="adm:plans:list")],
             [InlineKeyboardButton("➕  Add Plan", callback_data="adm:plans:add")],
+            [InlineKeyboardButton("💎  Set TON Price", callback_data="adm:plans:tonp")],
             [InlineKeyboardButton("🔴  Deactivate Plan", callback_data="adm:plans:deact")],
             [InlineKeyboardButton("⬅️  Admin Menu", callback_data="adm:home")],
         ]
@@ -216,6 +255,12 @@ def admin_settings(cfg: dict) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     f"🔄  Auto-Approve: {auto}",
                     callback_data="adm:settings:toggle_auto",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"💎  TON Payments: {'ON' if cfg.get('ton_enabled') else 'OFF'}",
+                    callback_data="adm:settings:toggle_ton",
                 )
             ],
             [

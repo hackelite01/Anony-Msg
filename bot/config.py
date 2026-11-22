@@ -50,13 +50,23 @@ SMS_SENDER_NAME = os.getenv("SMS_SENDER_NAME", "Anonymous").strip()
 PORT = int(os.getenv("PORT", "8000"))
 USE_POLLING = os.getenv("USE_POLLING", "false").strip().lower() in ("1", "true", "yes")
 
+# --- TON payments (verified on-chain via TON Center; see services/ton.py) ---
+# Receiving wallet can also be set from /admin -> Settings -> Set TON Wallet.
+TON_WALLET_ADDRESS = os.getenv("TON_WALLET_ADDRESS", "").strip()
+TONCENTER_URL = os.getenv("TONCENTER_URL", "https://toncenter.com").strip().rstrip("/")
+TONCENTER_API_KEY = os.getenv("TONCENTER_API_KEY", "").strip()  # optional, raises rate limit
+TON_POLL_SECONDS = int(os.getenv("TON_POLL_SECONDS", "20"))
+TON_ORDER_TTL_MINUTES = int(os.getenv("TON_ORDER_TTL_MINUTES", "60"))
+# Payments arriving after the TTL are still honoured for this long.
+TON_WATCH_HOURS = 24
+
 SMS_PER_PROVIDER_KEY = 5
 SMS_API_TIMEOUT = 10
 
 WELCOME_TEXT = (
     "👋 *Welcome to Anonymous SMS Bot*\n\n"
     "Send anonymous SMS worldwide using prepaid keys.\n\n"
-    "1. Buy a key (paid in Telegram Stars ⭐)\n"
+    "1. Buy a key (pay with Telegram Stars ⭐ or TON 💎)\n"
     "2. Use the key to send SMS\n"
     "3. Each plan has a fixed SMS limit\n\n"
     "Join our channel below, then verify membership to continue."
@@ -67,7 +77,7 @@ HELP_TEXT = (
     "• `/start` — register & verify channel membership\n"
     "• `/menu` — open main menu\n"
     "• `/cancel` — cancel current operation\n\n"
-    "*Buying a key:* tap 🛒 Buy Key, choose a plan, pay in Stars.\n"
+    "*Buying a key:* tap 🛒 Buy Key, choose a plan, pay in Stars or TON.\n"
     "*Sending SMS:* tap 📤 Send SMS, choose a key, enter number then message.\n"
     "*Your keys:* tap 🗝 My Keys to see remaining SMS.\n\n"
     "Numbers must include country code (digits only, 10–15 digits).\n"

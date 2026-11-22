@@ -12,6 +12,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import config
+from services.ton import fmt_ton
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,17 @@ async def payment_received(context, user, plan_name: str, stars: int) -> None:
         f"User: {_user_tag(user)}\n"
         f"Plan: {plan_name}\n"
         f"Paid: {stars}⭐",
+    )
+
+
+async def ton_payment_received(context, user, plan_name: str, amount_nano: int, tx_hash: str) -> None:
+    await post(
+        context,
+        "💎 *TON payment received*\n"
+        f"User: {_user_tag(user)}\n"
+        f"Plan: {plan_name}\n"
+        f"Paid: {fmt_ton(amount_nano)} TON\n"
+        f"Tx: `{tx_hash}`",
     )
 
 

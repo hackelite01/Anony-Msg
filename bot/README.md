@@ -258,3 +258,22 @@ python bot.py
 ---
 
 **Built with:** python-telegram-bot 21.6, motor 3.6, pymongo 4.9, aiohttp 3.10+
+
+## TON payments
+
+Besides Telegram Stars, a plan can be paid in TON. Bot API 10.4's "TON wallet" additions are
+not a payment method for bots, so TON payments are verified on-chain:
+
+1. `/admin` -> Settings -> **Set TON Wallet** (or `TON_WALLET_ADDRESS`): the wallet that receives payments.
+   Then switch **TON Payments** ON in the same menu (OFF by default; needs a wallet).
+2. `/admin` -> Plans -> **Add Plan** (step 4) or **Set TON Price** for existing plans. Plans without a
+   TON price keep using Stars only.
+3. With TON Payments ON, a user picking a plan that has a TON price chooses Stars or TON. For TON they get the amount, the
+   wallet and a unique comment (memo) to include.
+4. A background watcher scans the wallet (TON Center) every `TON_POLL_SECONDS` and matches transfers
+   by memo with amount >= price. A match creates the key (auto-approve) or a pending approval,
+   exactly like a Stars payment. The user can also tap "I've paid - check now".
+
+Notes: underpaid transfers and transfers with an unknown memo are reported to admins, not fulfilled.
+TON payments are not refunded automatically — rejecting a TON purchase tells you the amount and
+transaction to send back manually. The comment must be sent exactly as shown.

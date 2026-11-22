@@ -6,7 +6,8 @@ from typing import Any, Optional
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pymongo import ASCENDING
+from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 import config
 
@@ -39,6 +40,15 @@ async def init_db() -> AsyncIOMotorDatabase:
     )
     await _db.purchase_requests.create_index([("status", ASCENDING)])
     await _db.logs.create_index([("timestamp", ASCENDING)])
+    await _db.ton_orders.create_index([("memo", ASCENDING)], unique=True)
+    await _db.ton_orders.create_index([("status", ASCENDING), ("created_at", ASCENDING)])
+    await _db.ton_payments.create_index([("tx_hash", ASCENDING)], unique=True)
+    # one purchase request per TON order (defense in depth against double fulfilment)
+    await _db.purchase_requests.create_index(
+        [("ton_order_id", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"ton_order_id": {"$exists": True}},
+    )
 
     existing = await _db.config.find_one({"_id": "singleton"})
     if not existing:
@@ -47,6 +57,7 @@ async def init_db() -> AsyncIOMotorDatabase:
                 "_id": "singleton",
                 "auto_approve": True,
                 "ton_wallet": None,
+                "ton_enabled": False,
                 "admin_username": None,
             }
         )
@@ -133,17 +144,33 @@ async def get_plan(plan_id: str | ObjectId) -> Optional[dict]:
     return await get_db().plans.find_one({"_id": plan_id})
 
 
-async def add_plan(name: str, sms_limit: int, price_stars: int) -> dict:
+async def add_plan(
+    name: str,
+    sms_limit: int,
+    price_stars: int,
+    price_ton_nano: Optional[int] = None,
+) -> dict:
     doc = {
         "name": name,
         "sms_limit": sms_limit,
         "price_stars": price_stars,
+        "price_ton_nano": price_ton_nano,
         "active": True,
         "created_at": now_utc(),
     }
     res = await get_db().plans.insert_one(doc)
     doc["_id"] = res.inserted_id
     return doc
+
+
+async def set_plan_ton_price(plan_id: str | ObjectId, price_ton_nano: Optional[int]) -> bool:
+    """Set (or clear with None) a plan's TON price, in nanoTON."""
+    if isinstance(plan_id, str):
+        plan_id = ObjectId(plan_id)
+    res = await get_db().plans.update_one(
+        {"_id": plan_id}, {"$set": {"price_ton_nano": price_ton_nano}}
+    )
+    return res.matched_count > 0
 
 
 async def deactivate_plan(plan_id: str | ObjectId) -> bool:
@@ -376,6 +403,155 @@ async def total_revenue_stars() -> int:
     async for d in cur:
         return int(d.get("total", 0))
     return 0
+
+
+async def total_revenue_ton_nano() -> int:
+    cur = get_db().purchase_requests.aggregate(
+        [
+            {"$match": {"status": "approved", "payment_method": "ton"}},
+            {"$group": {"_id": None, "total": {"$sum": "$ton_amount_nano"}}},
+        ]
+    )
+    async for d in cur:
+        return int(d.get("total", 0))
+    return 0
+
+
+# ---------- TON orders / payments ----------
+
+async def create_ton_order(
+    telegram_id: int,
+    username: str,
+    plan: dict,
+    amount_nano: int,
+    memo: str,
+    wallet: str,
+) -> dict:
+    doc = {
+        "telegram_id": telegram_id,
+        "username": username or "",
+        "plan_id": plan["_id"],
+        "plan_name": plan["name"],
+        "sms_limit": plan["sms_limit"],
+        "amount_nano": amount_nano,
+        "memo": memo,
+        "wallet": wallet,
+        # awaiting -> paid (tx claimed) -> fulfilled ; or cancelled / error
+        "status": "awaiting",
+        "tx_hash": None,
+        "paid_nano": None,
+        "created_at": now_utc(),
+        "paid_at": None,
+    }
+    res = await get_db().ton_orders.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return doc
+
+
+async def get_ton_order(order_id: str | ObjectId) -> Optional[dict]:
+    if isinstance(order_id, str):
+        order_id = ObjectId(order_id)
+    return await get_db().ton_orders.find_one({"_id": order_id})
+
+
+async def find_open_ton_order(
+    telegram_id: int, plan_id: ObjectId, newer_than: datetime
+) -> Optional[dict]:
+    """Reuse the user's still-valid order for this plan instead of minting a new memo."""
+    return await get_db().ton_orders.find_one(
+        {
+            "telegram_id": telegram_id,
+            "plan_id": plan_id,
+            "status": "awaiting",
+            "created_at": {"$gte": newer_than},
+        }
+    )
+
+
+async def list_watchable_ton_orders(since: datetime) -> list[dict]:
+    cur = get_db().ton_orders.find({"status": "awaiting", "created_at": {"$gte": since}})
+    return [d async for d in cur]
+
+
+async def list_paid_unfulfilled_ton_orders() -> list[dict]:
+    cur = get_db().ton_orders.find({"status": "paid"})
+    return [d async for d in cur]
+
+
+async def claim_ton_order(
+    order_id: ObjectId, tx_hash: str, paid_nano: int
+) -> Optional[dict]:
+    """Atomically awaiting -> paid. Returns the order only for the single winning caller."""
+    return await get_db().ton_orders.find_one_and_update(
+        {"_id": order_id, "status": "awaiting"},
+        {"$set": {"status": "paid", "tx_hash": tx_hash, "paid_nano": paid_nano, "paid_at": now_utc()}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def set_ton_order_status(order_id: ObjectId, status: str) -> None:
+    await get_db().ton_orders.update_one({"_id": order_id}, {"$set": {"status": status}})
+
+
+async def cancel_ton_order(order_id: str | ObjectId, telegram_id: int) -> bool:
+    if isinstance(order_id, str):
+        order_id = ObjectId(order_id)
+    res = await get_db().ton_orders.update_one(
+        {"_id": order_id, "telegram_id": telegram_id, "status": "awaiting"},
+        {"$set": {"status": "cancelled"}},
+    )
+    return res.modified_count > 0
+
+
+async def record_ton_payment(tx: dict, status: str, order_id: Optional[ObjectId] = None) -> bool:
+    """Remember a transfer we flagged (underpaid/unmatched). False if already recorded."""
+    try:
+        await get_db().ton_payments.insert_one(
+            {
+                "tx_hash": tx["hash"],
+                "memo": tx["memo"],
+                "value_nano": tx["value"],
+                "source": tx["source"],
+                "status": status,
+                "order_id": order_id,
+                "recorded_at": now_utc(),
+            }
+        )
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+async def create_ton_purchase_request(order: dict, plan: dict) -> dict:
+    """Purchase request for a paid TON order. Idempotent per order."""
+    coll = get_db().purchase_requests
+    existing = await coll.find_one({"ton_order_id": order["_id"]})
+    if existing:
+        return existing
+    doc = {
+        "telegram_id": order["telegram_id"],
+        "username": order.get("username") or "",
+        "plan_id": plan["_id"],
+        "plan_name": plan["name"],
+        "sms_limit": plan["sms_limit"],
+        "keys_needed": ceil(plan["sms_limit"] / config.SMS_PER_PROVIDER_KEY),
+        "stars_paid": 0,
+        "payment_method": "ton",
+        "ton_amount_nano": order["paid_nano"],
+        "ton_tx_hash": order["tx_hash"],
+        "ton_order_id": order["_id"],
+        "payment_charge_id": order["tx_hash"],
+        "status": "pending",
+        "reject_reason": None,
+        "requested_at": now_utc(),
+        "resolved_at": None,
+    }
+    try:
+        res = await coll.insert_one(doc)
+    except DuplicateKeyError:
+        return await coll.find_one({"ton_order_id": order["_id"]})
+    doc["_id"] = res.inserted_id
+    return doc
 
 
 # ---------- logs ----------

@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 import config
-from services import db, key_generator
+from services import db, key_generator, ton
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -35,9 +35,15 @@ async def on_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboards.back_to_menu(),
         )
     else:
+        ton_enabled = await ton.is_enabled()
+        pay_text = (
+            "Pay with Telegram Stars ⭐ or TON 💎."
+            if ton_enabled
+            else "Pay in Telegram Stars ⭐."
+        )
         body, markup = (
-            "🛒 *Choose a plan*\n\nPay in Telegram Stars ⭐.",
-            keyboards.plans_keyboard(plans),
+            f"🛒 *Choose a plan*\n\n{pay_text}",
+            keyboards.plans_keyboard(plans, ton_enabled=ton_enabled),
         )
 
     if update.callback_query:
@@ -71,6 +77,38 @@ async def on_buy_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    # TON offered only if the admin enabled it, a wallet is set and the plan has a TON price.
+    if plan.get("price_ton_nano") and await ton.is_enabled():
+        await q.edit_message_text(
+            f"💳 *{plan['name']}* • {plan['sms_limit']} SMS\n\nChoose how to pay:",
+            reply_markup=keyboards.payment_methods(plan),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await _send_stars_invoice(update, context, plan)
+
+
+async def on_pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if await db.is_banned(update.effective_user.id):
+        return
+    plan = await db.get_plan(q.data.split(":", 2)[2])
+    if not plan or not plan.get("active"):
+        await q.edit_message_text(
+            "❌ That plan is no longer available.",
+            reply_markup=keyboards.back_to_menu(),
+        )
+        return
+    await _send_stars_invoice(update, context, plan)
+
+
+async def _send_stars_invoice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict
+) -> None:
+    q = update.callback_query
+    user_id = update.effective_user.id
     payload = json.dumps(
         {"plan_id": str(plan["_id"]), "telegram_id": user_id}
     )
@@ -196,6 +234,21 @@ async def _auto_fulfill(
     )
 
 
+async def assign_key_for_request(context, user, request: dict, plan: dict) -> str:
+    """Generate a code, reserve provider keys, create the user key, approve the request.
+
+    Returns the code; raises on failure. Shared by non-Stars payment paths (TON).
+    """
+    code = await key_generator.generate_unique_code()
+    reserved_ids = await db.reserve_keys_for(code, request["keys_needed"])
+    await db.create_user_key(code, user.id, plan, reserved_ids)
+    await db.set_purchase_status(request["_id"], "approved")
+    await activity_log.key_assigned(
+        context, user, code, plan["name"], plan["sms_limit"], auto=True
+    )
+    return code
+
+
 async def _notify_admins_pending(
     context: ContextTypes.DEFAULT_TYPE,
     user,
@@ -209,14 +262,14 @@ async def _notify_admins_pending(
             "🔔 *New purchase awaits approval*\n\n"
             f"User: {uname}\n"
             f"Plan: {plan['name']} ({plan['sms_limit']} SMS)\n"
-            f"Paid: {request['stars_paid']}⭐\n"
+            f"Paid: {ton.paid_label(request)}\n"
             f"Keys needed: {request['keys_needed']}\n"
             f"Request ID: `{request['_id']}`"
         )
     else:
         text = (
             "🚨 *ACTION NEEDED*\n\n"
-            f"User: {uname} paid *{request['stars_paid']}⭐* for *{plan['name']}*.\n"
+            f"User: {uname} paid *{ton.paid_label(request)}* for *{plan['name']}*.\n"
             f"Keys needed: {request['keys_needed']} — *no keys available*.\n"
             "Add keys, then approve manually.\n\n"
             f"Request ID: `{request['_id']}`"
@@ -365,17 +418,26 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
         await q.edit_message_text("⚠️ Request no longer pending.")
         return
 
+    is_ton = request.get("payment_method") == "ton"
     refund_ok = True
     refund_err = None
-    try:
-        await context.bot.refund_star_payment(
-            user_id=request["telegram_id"],
-            telegram_payment_charge_id=request["payment_charge_id"],
-        )
-    except TelegramError as e:
-        log.exception("refund failed: %s", e)
+    if is_ton:
+        # The Bot API can't refund on-chain transfers: the admin sends it back manually.
         refund_ok = False
-        refund_err = str(e)
+        refund_err = (
+            f"TON payment — refund manually: {ton.paid_label(request)}, "
+            f"tx {request.get('ton_tx_hash')}"
+        )
+    else:
+        try:
+            await context.bot.refund_star_payment(
+                user_id=request["telegram_id"],
+                telegram_payment_charge_id=request["payment_charge_id"],
+            )
+        except TelegramError as e:
+            log.exception("refund failed: %s", e)
+            refund_ok = False
+            refund_err = str(e)
 
     await db.set_purchase_status(req_id, "refunded" if refund_ok else "rejected", reason)
 
@@ -401,7 +463,10 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=request["telegram_id"],
                 text=(
-                    "❌ Your purchase was rejected. Refund failed automatically — "
+                    "❌ Your purchase was rejected. Your TON payment will be returned "
+                    "manually — please contact admin."
+                    if is_ton
+                    else "❌ Your purchase was rejected. Refund failed automatically — "
                     "please contact admin."
                 ),
             )
@@ -410,7 +475,7 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await q.edit_message_text(
         f"{'💸 Refunded' if refund_ok else '⚠️ Rejected without refund'} — reason: {reason}"
-        + (f"\nError: {refund_err}" if refund_err else "")
+        + (f"\nNote: {refund_err}" if refund_err else "")
     )
 
 
@@ -420,6 +485,7 @@ def register(app) -> None:
         MessageHandler(filters.Regex(rf"^{keyboards.BTN_BUY}$"), on_buy_menu)
     )
     app.add_handler(CallbackQueryHandler(on_buy_plan, pattern=r"^buy:[a-f0-9]+$"))
+    app.add_handler(CallbackQueryHandler(on_pay_stars, pattern=r"^pay:stars:[a-f0-9]+$"))
     app.add_handler(PreCheckoutQueryHandler(on_pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, on_successful_payment))
     app.add_handler(CallbackQueryHandler(admin_approve, pattern=r"^adm:approve:"))

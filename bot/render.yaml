@@ -28,5 +28,9 @@ services:
         sync: false
       - key: SMS_SENDER_NAME
         value: Anonymous
+      - key: TON_WALLET_ADDRESS
+        sync: false
+      - key: TONCENTER_API_KEY
+        sync: false
       - key: PORT
         value: 8000
