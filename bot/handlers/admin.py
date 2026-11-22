@@ -306,6 +306,52 @@ async def on_plans_deact_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 @_admin_only
+async def on_plans_del(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    plans = await db.list_plans(active_only=False)
+    if not plans:
+        await q.edit_message_text("No plans to delete.", reply_markup=keyboards.admin_plans_menu())
+        return
+    await q.edit_message_text(
+        "Choose a plan to delete:",
+        reply_markup=keyboards.admin_plans_picker(plans, "del_do"),
+    )
+
+
+@_admin_only
+async def on_plans_del_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    plan_id = q.data.rsplit(":", 1)[1]
+    plan = await db.get_plan(plan_id)
+    if not plan or plan.get("deleted"):
+        await q.edit_message_text("❌ Plan not found.", reply_markup=keyboards.admin_plans_menu())
+        return
+    await q.edit_message_text(
+        f"Delete plan '{plan['name']}' ({plan['sms_limit']} SMS)?\n\n"
+        "It disappears from the lists and can't be bought. Existing user keys and "
+        "payments already in progress are not affected.",
+        reply_markup=keyboards.admin_confirm_delete_plan(plan_id),
+    )
+
+
+@_admin_only
+async def on_plans_del_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    plan_id = q.data.rsplit(":", 1)[1]
+    plan = await db.get_plan(plan_id)
+    ok = await db.delete_plan(plan_id)
+    if ok and plan:
+        await activity_log.plan_deleted(context, update.effective_user, plan["name"])
+    await q.edit_message_text(
+        "✅ Plan deleted." if ok else "❌ Plan not found or already deleted.",
+        reply_markup=keyboards.admin_plans_menu(),
+    )
+
+
+@_admin_only
 async def on_plans_tonp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -419,14 +465,14 @@ async def add_plan_ton(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     limit = context.user_data.pop("new_plan_limit")
     price = context.user_data.pop("new_plan_price")
     plan = await db.add_plan(name, limit, price, price_ton_nano)
-    await activity_log.plan_added(
-        context, update.effective_user, plan["name"], plan["sms_limit"], plan["price_stars"]
-    )
     ton_part = f", {ton.fmt_ton(price_ton_nano)} TON" if price_ton_nano else ""
     await update.message.reply_text(
         f"✅ Plan '{plan['name']}' added: {plan['sms_limit']} SMS, "
         f"{plan['price_stars']} Stars{ton_part}",
         reply_markup=keyboards.admin_plans_menu(),
+    )
+    await activity_log.plan_added(
+        context, update.effective_user, plan["name"], plan["sms_limit"], plan["price_stars"]
     )
     return ConversationHandler.END
 
@@ -776,6 +822,13 @@ def register(app) -> None:
     app.add_handler(CallbackQueryHandler(on_plans_list, pattern=r"^adm:plans:list$"))
     app.add_handler(CallbackQueryHandler(on_plans_deact, pattern=r"^adm:plans:deact$"))
     app.add_handler(CallbackQueryHandler(on_plans_tonp, pattern=r"^adm:plans:tonp$"))
+    app.add_handler(CallbackQueryHandler(on_plans_del, pattern=r"^adm:plans:del$"))
+    app.add_handler(
+        CallbackQueryHandler(on_plans_del_do, pattern=r"^adm:plans:del_do:[a-f0-9]+$")
+    )
+    app.add_handler(
+        CallbackQueryHandler(on_plans_del_yes, pattern=r"^adm:plans:del_yes:[a-f0-9]+$")
+    )
     app.add_handler(
         CallbackQueryHandler(on_plans_deact_do, pattern=r"^adm:plans:deact_do:[a-f0-9]+$")
     )

@@ -133,7 +133,9 @@ async def update_config(**fields) -> None:
 # ---------- plans ----------
 
 async def list_plans(active_only: bool = True) -> list[dict]:
-    q = {"active": True} if active_only else {}
+    q: dict[str, Any] = {"deleted": {"$ne": True}}
+    if active_only:
+        q["active"] = True
     cur = get_db().plans.find(q).sort("price_stars", ASCENDING)
     return [d async for d in cur]
 
@@ -171,6 +173,18 @@ async def set_plan_ton_price(plan_id: str | ObjectId, price_ton_nano: Optional[i
         {"_id": plan_id}, {"$set": {"price_ton_nano": price_ton_nano}}
     )
     return res.matched_count > 0
+
+
+async def delete_plan(plan_id: str | ObjectId) -> bool:
+    """Soft delete: hidden from every list and unbuyable, but the record is kept so
+    payments already in flight (open Stars invoice / TON order) can still be fulfilled."""
+    if isinstance(plan_id, str):
+        plan_id = ObjectId(plan_id)
+    res = await get_db().plans.update_one(
+        {"_id": plan_id, "deleted": {"$ne": True}},
+        {"$set": {"active": False, "deleted": True, "deleted_at": now_utc()}},
+    )
+    return res.modified_count > 0
 
 
 async def deactivate_plan(plan_id: str | ObjectId) -> bool:

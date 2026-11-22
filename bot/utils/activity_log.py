@@ -133,6 +133,13 @@ async def plan_added(context, admin, name: str, sms_limit: int, price_stars: int
     )
 
 
+async def plan_deleted(context, admin, name: str) -> None:
+    await post(
+        context,
+        f"🗑 *Plan deleted* — {name} by {_user_tag(admin)}",
+    )
+
+
 async def plan_deactivated(context, admin, plan_id: str) -> None:
     await post(
         context,

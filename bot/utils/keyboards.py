@@ -228,7 +228,19 @@ def admin_plans_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("➕  Add Plan", callback_data="adm:plans:add")],
             [InlineKeyboardButton("💎  Set TON Price", callback_data="adm:plans:tonp")],
             [InlineKeyboardButton("🔴  Deactivate Plan", callback_data="adm:plans:deact")],
+            [InlineKeyboardButton("🗑  Delete Plan", callback_data="adm:plans:del")],
             [InlineKeyboardButton("⬅️  Admin Menu", callback_data="adm:home")],
+        ]
+    )
+
+
+def admin_confirm_delete_plan(plan_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🗑  Yes, delete", callback_data=f"adm:plans:del_yes:{plan_id}"),
+                InlineKeyboardButton("⬅️  No", callback_data="adm:plans"),
+            ]
         ]
     )
 
