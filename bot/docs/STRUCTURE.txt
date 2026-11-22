@@ -1,0 +1,72 @@
+DIRECTORY STRUCTURE - Anony-Msg Project
+========================================
+
+🚀 PRODUCTION BOT (Use This!)
+├── bot/
+│   ├── bot.py                    # Entry point: aiohttp webhook server
+│   ├── config.py                 # Environment & constants
+│   ├── handlers/
+│   │   ├── start.py              # /start, /menu, membership gate
+│   │   ├── sms.py                # Send SMS conversation
+│   │   ├── purchase.py           # Buy Key, Stars invoice, fulfillment
+│   │   ├── mykeys.py             # List user keys
+│   │   ├── admin.py              # /admin panel (full dashboard)
+│   │   └── __init__.py
+│   ├── services/
+│   │   ├── db.py                 # Motor async MongoDB
+│   │   ├── sms_service.py        # seven.io API integration
+│   │   ├── key_generator.py      # Generate unique codes
+│   │   └── __init__.py
+│   ├── utils/
+│   │   ├── keyboards.py          # All inline keyboards
+│   │   └── __init__.py
+│   ├── requirements.txt          # Python dependencies
+│   ├── .env.example              # Environment template
+│   ├── Procfile                  # Render deployment config
+│   ├── render.yaml               # Render service template
+│   ├── setup.sh                  # Local setup script
+│   ├── README.md                 # Full documentation
+│   ├── QUICKSTART.md             # 5-minute setup
+│   └── DEPLOYMENT.md             # Deployment checklist
+
+📦 LEGACY CODE (Archive - Do NOT use)
+└── legacy/
+    ├── bot.py, bot1.py, botenc.py, botf.py, botterminal.py
+    ├── send.py, Run.sh, send.sh
+    ├── bot_data/
+    ├── prospeo/
+    └── images/
+
+📁 ROOT
+├── README_STRUCTURE.md           # Directory layout explanation
+├── STRUCTURE.txt                 # This file
+├── .env                          # Your live secrets (DO NOT commit)
+├── .git/                         # Version control
+└── Other metadata files
+
+KEY FILES TO READ
+=================
+1. Start here: bot/QUICKSTART.md (5 min setup)
+2. Reference: bot/README.md (full docs)
+3. Deploy: bot/DEPLOYMENT.md (checklist)
+
+QUICK START
+===========
+cd bot
+cp .env.example .env           # Edit this with your credentials
+pip install -r requirements.txt
+python bot.py                  # Runs on http://0.0.0.0:8000
+
+IMPORTANT
+=========
+✅ All production code is in bot/
+❌ Never edit legacy/ (it's archived)
+⚙️  Always configure bot/.env before running
+🌐 Use bot/render.yaml for Render deployment
+📝 Admin panel: type /admin in Telegram
+
+IGNORE
+======
+- legacy/ folder (old versions, reference only)
+- .env file in root (use bot/.env instead)
+

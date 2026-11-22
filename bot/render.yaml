@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: anony-sms-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: CHANNEL_ID
+        sync: false
+      - key: CHANNEL_USERNAME
+        sync: false
+      - key: ADMIN_USER_IDS
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: anonsmbot
+      - key: WELCOME_GIF_URL
+        sync: false
+      - key: SUPPORT_CHANNEL_URL
+        sync: false
+      - key: SMS_SENDER_NAME
+        value: Anonymous
+      - key: PORT
+        value: 8000
