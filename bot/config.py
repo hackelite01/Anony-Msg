@@ -36,6 +36,7 @@ def _parse_chat_id(raw: str) -> str | int:
 
 CHANNEL_ID = _parse_chat_id(os.getenv("CHANNEL_ID", ""))
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip().lstrip("@")
+
 LOG_CHANNEL_ID = _parse_chat_id(os.getenv("LOG_CHANNEL_ID", ""))
 
 ADMIN_USER_IDS = _parse_admins(os.getenv("ADMIN_USER_IDS", ""))
@@ -60,13 +61,31 @@ TON_ORDER_TTL_MINUTES = int(os.getenv("TON_ORDER_TTL_MINUTES", "60"))
 # Payments arriving after the TTL are still honoured for this long.
 TON_WATCH_HOURS = 24
 
+# --- Bitcoin payments (verified on-chain; see services/btc.py) ---
+# Esplora-compatible APIs, tried in order (first one that answers wins).
+BTC_API_URLS = [
+    u.strip().rstrip("/")
+    for u in os.getenv("BTC_API_URLS", "https://mempool.space,https://blockstream.info").split(",")
+    if u.strip()
+]
+BTC_MIN_CONFIRMATIONS = int(os.getenv("BTC_MIN_CONFIRMATIONS", "1"))
+BTC_POLL_SECONDS = int(os.getenv("BTC_POLL_SECONDS", "60"))
+BTC_ORDER_TTL_MINUTES = int(os.getenv("BTC_ORDER_TTL_MINUTES", "60"))
+BTC_WATCH_HOURS = 24
+
+# --- UPI (manual approval): max unreviewed submissions per user ---
+UPI_MAX_PENDING_PER_USER = 3
+
+# Colored buttons (Bot API 9.4). Set BUTTON_STYLES=false to show plain grey buttons.
+BUTTON_STYLES = os.getenv("BUTTON_STYLES", "true").strip().lower() in ("1", "true", "yes")
+
 SMS_PER_PROVIDER_KEY = 5
 SMS_API_TIMEOUT = 10
 
 WELCOME_TEXT = (
     "👋 *Welcome to Anonymous SMS Bot*\n\n"
     "Send anonymous SMS worldwide using prepaid keys.\n\n"
-    "1. Buy a key (pay with Telegram Stars ⭐ or TON 💎)\n"
+    "1. Buy a key (pay with Telegram Stars ⭐, crypto or UPI)\n"
     "2. Use the key to send SMS\n"
     "3. Each plan has a fixed SMS limit\n\n"
     "Join our channel below, then verify membership to continue."
@@ -77,7 +96,7 @@ HELP_TEXT = (
     "• `/start` — register & verify channel membership\n"
     "• `/menu` — open main menu\n"
     "• `/cancel` — cancel current operation\n\n"
-    "*Buying a key:* tap 🛒 Buy Key, choose a plan, pay in Stars or TON.\n"
+    "*Buying a key:* tap 🛒 Buy Key, choose a plan, then pick a payment method.\n"
     "*Sending SMS:* tap 📤 Send SMS, choose a key, enter number then message.\n"
     "*Your keys:* tap 🗝 My Keys to see remaining SMS.\n\n"
     "Numbers must include country code (digits only, 10–15 digits).\n"

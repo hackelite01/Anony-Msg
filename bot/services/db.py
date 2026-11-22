@@ -1,5 +1,6 @@
 """Async MongoDB layer (motor). All read/write helpers live here."""
 import logging
+import re
 from datetime import datetime, timezone
 from math import ceil
 from typing import Any, Optional
@@ -49,6 +50,36 @@ async def init_db() -> AsyncIOMotorDatabase:
         unique=True,
         partialFilterExpression={"ton_order_id": {"$exists": True}},
     )
+    # BTC: an amount identifies an order, so it must be unique among open orders
+    await _db.btc_orders.create_index(
+        [("amount_sats", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"status": "awaiting"},
+    )
+    await _db.btc_orders.create_index([("status", ASCENDING), ("created_at", ASCENDING)])
+    await _db.btc_payments.create_index(
+        [("txid", ASCENDING), ("vout", ASCENDING)], unique=True
+    )
+    await _db.purchase_requests.create_index(
+        [("btc_order_id", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"btc_order_id": {"$exists": True}},
+    )
+    # promo codes / free plans
+    await _db.promo_codes.create_index([("code", ASCENDING)], unique=True)
+    await _db.promo_redemptions.create_index(
+        [("code", ASCENDING), ("telegram_id", ASCENDING)], unique=True
+    )
+    await _db.promo_applied.create_index([("telegram_id", ASCENDING)], unique=True)
+    await _db.free_claims.create_index(
+        [("telegram_id", ASCENDING), ("plan_id", ASCENDING)], unique=True
+    )
+    # UPI: one purchase request per UTR (stops the same payment being claimed twice)
+    await _db.purchase_requests.create_index(
+        [("upi_utr", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"upi_utr": {"$exists": True}},
+    )
 
     existing = await _db.config.find_one({"_id": "singleton"})
     if not existing:
@@ -58,6 +89,11 @@ async def init_db() -> AsyncIOMotorDatabase:
                 "auto_approve": True,
                 "ton_wallet": None,
                 "ton_enabled": False,
+                "stars_enabled": True,
+                "btc_enabled": False,
+                "btc_address": None,
+                "upi_enabled": False,
+                "upi_id": None,
                 "admin_username": None,
             }
         )
@@ -151,18 +187,44 @@ async def add_plan(
     sms_limit: int,
     price_stars: int,
     price_ton_nano: Optional[int] = None,
+    price_btc_sats: Optional[int] = None,
+    price_inr_paise: Optional[int] = None,
+    is_free: bool = False,
 ) -> dict:
     doc = {
+        "is_free": is_free,
         "name": name,
         "sms_limit": sms_limit,
         "price_stars": price_stars,
         "price_ton_nano": price_ton_nano,
+        "price_btc_sats": price_btc_sats,
+        "price_inr_paise": price_inr_paise,
         "active": True,
         "created_at": now_utc(),
     }
     res = await get_db().plans.insert_one(doc)
     doc["_id"] = res.inserted_id
     return doc
+
+
+PRICE_FIELDS = ("price_ton_nano", "price_btc_sats", "price_inr_paise")
+
+
+async def set_plan_price(plan_id: str | ObjectId, field: str, value: Optional[int]) -> bool:
+    """Set (or clear with None) a plan's price in one currency's smallest unit."""
+    if field not in PRICE_FIELDS:
+        raise ValueError(f"unknown price field: {field}")
+    if isinstance(plan_id, str):
+        plan_id = ObjectId(plan_id)
+    res = await get_db().plans.update_one({"_id": plan_id}, {"$set": {field: value}})
+    return res.matched_count > 0
+
+
+async def set_plan_free(plan_id: str | ObjectId, is_free: bool) -> bool:
+    if isinstance(plan_id, str):
+        plan_id = ObjectId(plan_id)
+    res = await get_db().plans.update_one({"_id": plan_id}, {"$set": {"is_free": is_free}})
+    return res.matched_count > 0
 
 
 async def set_plan_ton_price(plan_id: str | ObjectId, price_ton_nano: Optional[int]) -> bool:
@@ -440,6 +502,7 @@ async def create_ton_order(
     amount_nano: int,
     memo: str,
     wallet: str,
+    promo: Optional[str] = None,
 ) -> dict:
     doc = {
         "telegram_id": telegram_id,
@@ -450,6 +513,7 @@ async def create_ton_order(
         "amount_nano": amount_nano,
         "memo": memo,
         "wallet": wallet,
+        "promo": promo,
         # awaiting -> paid (tx claimed) -> fulfilled ; or cancelled / error
         "status": "awaiting",
         "tx_hash": None,
@@ -566,6 +630,400 @@ async def create_ton_purchase_request(order: dict, plan: dict) -> dict:
         return await coll.find_one({"ton_order_id": order["_id"]})
     doc["_id"] = res.inserted_id
     return doc
+
+
+async def total_revenue_method(method: str, field: str) -> int:
+    """Sum of `field` over approved purchase requests paid with `method`."""
+    cur = get_db().purchase_requests.aggregate(
+        [
+            {"$match": {"status": "approved", "payment_method": method}},
+            {"$group": {"_id": None, "total": {"$sum": f"${field}"}}},
+        ]
+    )
+    async for d in cur:
+        return int(d.get("total", 0))
+    return 0
+
+
+# ---------- BTC orders ----------
+
+async def create_btc_order(
+    telegram_id: int,
+    username: str,
+    plan: dict,
+    amount_sats: int,
+    base_sats: int,
+    address: str,
+    promo: Optional[str] = None,
+) -> dict:
+    """Insert an awaiting order. Raises DuplicateKeyError if another open order has this amount."""
+    doc = {
+        "telegram_id": telegram_id,
+        "username": username or "",
+        "plan_id": plan["_id"],
+        "plan_name": plan["name"],
+        "sms_limit": plan["sms_limit"],
+        "base_sats": base_sats,
+        "amount_sats": amount_sats,
+        "address": address,
+        "promo": promo,
+        # awaiting -> paid (output claimed) -> fulfilled ; or cancelled / error
+        "status": "awaiting",
+        "seen_txid": None,
+        "txid": None,
+        "vout": None,
+        "paid_sats": None,
+        "created_at": now_utc(),
+        "paid_at": None,
+    }
+    res = await get_db().btc_orders.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return doc
+
+
+async def get_btc_order(order_id: str | ObjectId) -> Optional[dict]:
+    if isinstance(order_id, str):
+        order_id = ObjectId(order_id)
+    return await get_db().btc_orders.find_one({"_id": order_id})
+
+
+async def find_open_btc_order(
+    telegram_id: int, plan_id: ObjectId, newer_than: datetime
+) -> Optional[dict]:
+    return await get_db().btc_orders.find_one(
+        {
+            "telegram_id": telegram_id,
+            "plan_id": plan_id,
+            "status": "awaiting",
+            "created_at": {"$gte": newer_than},
+        }
+    )
+
+
+async def list_watchable_btc_orders(since: datetime) -> list[dict]:
+    cur = get_db().btc_orders.find({"status": "awaiting", "created_at": {"$gte": since}})
+    return [d async for d in cur]
+
+
+async def list_paid_unfulfilled_btc_orders() -> list[dict]:
+    cur = get_db().btc_orders.find({"status": "paid"})
+    return [d async for d in cur]
+
+
+async def claim_btc_order(
+    order_id: ObjectId, txid: str, vout: int, paid_sats: int
+) -> Optional[dict]:
+    """Atomically awaiting -> paid. Returns the order only for the single winning caller."""
+    return await get_db().btc_orders.find_one_and_update(
+        {"_id": order_id, "status": "awaiting"},
+        {
+            "$set": {
+                "status": "paid",
+                "txid": txid,
+                "vout": vout,
+                "paid_sats": paid_sats,
+                "paid_at": now_utc(),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def set_btc_order_status(order_id: ObjectId, status: str) -> None:
+    await get_db().btc_orders.update_one({"_id": order_id}, {"$set": {"status": status}})
+
+
+async def cancel_btc_order(order_id: str | ObjectId, telegram_id: int) -> bool:
+    if isinstance(order_id, str):
+        order_id = ObjectId(order_id)
+    res = await get_db().btc_orders.update_one(
+        {"_id": order_id, "telegram_id": telegram_id, "status": "awaiting"},
+        {"$set": {"status": "cancelled"}},
+    )
+    return res.modified_count > 0
+
+
+async def mark_btc_seen(order_id: ObjectId, txid: str) -> bool:
+    """True only the first time an unconfirmed payment is noticed for this order."""
+    doc = await get_db().btc_orders.find_one_and_update(
+        {"_id": order_id, "status": "awaiting", "seen_txid": None},
+        {"$set": {"seen_txid": txid}},
+    )
+    return doc is not None
+
+
+async def record_btc_output(out: dict, status: str, order_id: Optional[ObjectId] = None) -> bool:
+    """Remember an output we've used/flagged. False if (txid, vout) was already recorded."""
+    try:
+        await get_db().btc_payments.insert_one(
+            {
+                "txid": out["txid"],
+                "vout": out["vout"],
+                "value_sats": out["value"],
+                "status": status,
+                "order_id": order_id,
+                "recorded_at": now_utc(),
+            }
+        )
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+async def create_btc_purchase_request(order: dict, plan: dict) -> dict:
+    """Purchase request for a paid BTC order. Idempotent per order."""
+    coll = get_db().purchase_requests
+    existing = await coll.find_one({"btc_order_id": order["_id"]})
+    if existing:
+        return existing
+    doc = {
+        "telegram_id": order["telegram_id"],
+        "username": order.get("username") or "",
+        "plan_id": plan["_id"],
+        "plan_name": plan["name"],
+        "sms_limit": plan["sms_limit"],
+        "keys_needed": ceil(plan["sms_limit"] / config.SMS_PER_PROVIDER_KEY),
+        "stars_paid": 0,
+        "payment_method": "btc",
+        "btc_amount_sats": order["paid_sats"],
+        "btc_txid": order["txid"],
+        "btc_order_id": order["_id"],
+        "payment_charge_id": order["txid"],
+        "status": "pending",
+        "reject_reason": None,
+        "requested_at": now_utc(),
+        "resolved_at": None,
+    }
+    try:
+        res = await coll.insert_one(doc)
+    except DuplicateKeyError:
+        return await coll.find_one({"btc_order_id": order["_id"]})
+    doc["_id"] = res.inserted_id
+    return doc
+
+
+# ---------- UPI (manual approval) ----------
+
+async def count_pending_upi(telegram_id: int) -> int:
+    return await get_db().purchase_requests.count_documents(
+        {"telegram_id": telegram_id, "payment_method": "upi", "status": "pending"}
+    )
+
+
+async def create_upi_purchase_request(
+    telegram_id: int,
+    username: str,
+    plan: dict,
+    utr: str,
+    amount_paise: int,
+    screenshot_file_id: Optional[str],
+    promo_code: Optional[str] = None,
+) -> Optional[dict]:
+    """Pending request awaiting admin approval. None if this UTR was already submitted."""
+    doc = {
+        "telegram_id": telegram_id,
+        "username": username or "",
+        "plan_id": plan["_id"],
+        "plan_name": plan["name"],
+        "sms_limit": plan["sms_limit"],
+        "keys_needed": ceil(plan["sms_limit"] / config.SMS_PER_PROVIDER_KEY),
+        "stars_paid": 0,
+        "payment_method": "upi",
+        "upi_amount_paise": amount_paise,
+        "upi_utr": utr,
+        "screenshot_file_id": screenshot_file_id,
+        "promo_code": promo_code,
+        "payment_charge_id": utr,
+        "status": "pending",
+        "reject_reason": None,
+        "requested_at": now_utc(),
+        "resolved_at": None,
+    }
+    try:
+        res = await get_db().purchase_requests.insert_one(doc)
+    except DuplicateKeyError:
+        return None
+    doc["_id"] = res.inserted_id
+    return doc
+
+
+# ---------- users lookup ----------
+
+async def find_user_by_username(username: str) -> Optional[dict]:
+    name = username.strip().lstrip("@")
+    if not name:
+        return None
+    return await get_db().bot_users.find_one(
+        {"username": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    )
+
+
+# ---------- grants: gift / free plan / 100% promo ----------
+
+async def create_grant_request(
+    telegram_id: int, username: str, plan: dict, method: str, extra: Optional[dict] = None
+) -> dict:
+    """An unpaid key grant (method: gift | free | promo). Created pending, approved on assignment."""
+    doc = {
+        "telegram_id": telegram_id,
+        "username": username or "",
+        "plan_id": plan["_id"],
+        "plan_name": plan["name"],
+        "sms_limit": plan["sms_limit"],
+        "keys_needed": ceil(plan["sms_limit"] / config.SMS_PER_PROVIDER_KEY),
+        "stars_paid": 0,
+        "payment_method": method,
+        "payment_charge_id": f"{method}:{now_utc().isoformat()}",
+        "status": "pending",
+        "reject_reason": None,
+        "requested_at": now_utc(),
+        "resolved_at": None,
+        **(extra or {}),
+    }
+    res = await get_db().purchase_requests.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return doc
+
+
+async def has_free_claim(telegram_id: int, plan_id: str) -> bool:
+    return await get_db().free_claims.count_documents(
+        {"telegram_id": telegram_id, "plan_id": str(plan_id)}, limit=1
+    ) > 0
+
+
+async def claim_free(telegram_id: int, plan_id: str) -> bool:
+    """True if this user hadn't claimed this free plan yet (and now has)."""
+    try:
+        await get_db().free_claims.insert_one(
+            {"telegram_id": telegram_id, "plan_id": str(plan_id), "at": now_utc()}
+        )
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+async def release_free_claim(telegram_id: int, plan_id: str) -> None:
+    await get_db().free_claims.delete_one({"telegram_id": telegram_id, "plan_id": str(plan_id)})
+
+
+# ---------- promo codes ----------
+
+async def create_promo(
+    code: str,
+    percent_off: int,
+    max_uses: Optional[int],
+    expires_at: Optional[datetime],
+    only_user_id: Optional[int],
+    created_by: int,
+) -> Optional[dict]:
+    doc = {
+        "code": code,
+        "percent_off": percent_off,
+        "max_uses": max_uses,
+        "uses": 0,
+        "expires_at": expires_at,
+        "only_user_id": only_user_id,
+        "active": True,
+        "created_by": created_by,
+        "created_at": now_utc(),
+    }
+    try:
+        await get_db().promo_codes.insert_one(doc)
+    except DuplicateKeyError:
+        return None
+    return doc
+
+
+async def get_promo(code: str) -> Optional[dict]:
+    return await get_db().promo_codes.find_one({"code": code})
+
+
+async def list_promos(limit: int = 30) -> list[dict]:
+    cur = get_db().promo_codes.find({}).sort("created_at", -1).limit(limit)
+    return [d async for d in cur]
+
+
+async def set_promo_active(code: str, active: bool) -> bool:
+    res = await get_db().promo_codes.update_one({"code": code}, {"$set": {"active": active}})
+    return res.matched_count > 0
+
+
+async def has_active_promos() -> bool:
+    return await get_db().promo_codes.count_documents(
+        {
+            "active": True,
+            "$or": [{"expires_at": None}, {"expires_at": {"$gt": now_utc().replace(tzinfo=None)}}],
+        },
+        limit=1,
+    ) > 0
+
+
+async def has_redeemed_promo(code: str, telegram_id: int) -> bool:
+    return await get_db().promo_redemptions.count_documents(
+        {"code": code, "telegram_id": telegram_id}, limit=1
+    ) > 0
+
+
+async def consume_promo(code: str, telegram_id: int) -> bool:
+    """Atomically count one use for this user. False if already used by them or exhausted."""
+    d = get_db()
+    try:
+        await d.promo_redemptions.insert_one(
+            {"code": code, "telegram_id": telegram_id, "at": now_utc()}
+        )
+    except DuplicateKeyError:
+        return False
+    doc = await d.promo_codes.find_one_and_update(
+        {
+            "code": code,
+            "active": True,
+            "$or": [{"max_uses": None}, {"$expr": {"$lt": ["$uses", "$max_uses"]}}],
+        },
+        {"$inc": {"uses": 1}},
+    )
+    if doc is None:
+        await d.promo_redemptions.delete_one({"code": code, "telegram_id": telegram_id})
+        return False
+    return True
+
+
+async def release_promo(code: str, telegram_id: int) -> None:
+    """Undo a consume (e.g. the key grant failed afterwards)."""
+    d = get_db()
+    res = await d.promo_redemptions.delete_one({"code": code, "telegram_id": telegram_id})
+    if res.deleted_count:
+        await d.promo_codes.update_one({"code": code, "uses": {"$gt": 0}}, {"$inc": {"uses": -1}})
+
+
+async def set_applied_promo(
+    telegram_id: int, plan_id: str, code: str, percent: int, expires_at: datetime
+) -> None:
+    await get_db().promo_applied.update_one(
+        {"telegram_id": telegram_id},
+        {
+            "$set": {
+                "plan_id": str(plan_id),
+                "code": code,
+                "percent": percent,
+                "expires_at": expires_at.replace(tzinfo=None),
+            }
+        },
+        upsert=True,
+    )
+
+
+async def get_applied_promo(telegram_id: int, plan_id: str) -> Optional[dict]:
+    return await get_db().promo_applied.find_one(
+        {
+            "telegram_id": telegram_id,
+            "plan_id": str(plan_id),
+            "expires_at": {"$gt": now_utc().replace(tzinfo=None)},
+        }
+    )
+
+
+async def clear_applied_promo(telegram_id: int) -> None:
+    await get_db().promo_applied.delete_one({"telegram_id": telegram_id})
 
 
 # ---------- logs ----------

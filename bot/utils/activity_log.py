@@ -12,6 +12,8 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import config
+from services.btc import fmt_btc_exact
+from services.payments import fmt_inr
 from services.ton import fmt_ton
 
 log = logging.getLogger(__name__)
@@ -91,6 +93,39 @@ async def ton_payment_received(context, user, plan_name: str, amount_nano: int, 
         f"Plan: {plan_name}\n"
         f"Paid: {fmt_ton(amount_nano)} TON\n"
         f"Tx: `{tx_hash}`",
+    )
+
+
+async def btc_payment_received(context, user, plan_name: str, sats: int, txid: str) -> None:
+    await post(
+        context,
+        "₿ *BTC payment received*\n"
+        f"User: {_user_tag(user)}\n"
+        f"Plan: {plan_name}\n"
+        f"Paid: {fmt_btc_exact(sats)} BTC\n"
+        f"Tx: `{txid}`",
+    )
+
+
+async def upi_submitted(context, user, plan_name: str, paise: int, utr: str) -> None:
+    await post(
+        context,
+        "🇮🇳 *UPI payment submitted* (awaiting approval)\n"
+        f"User: {_user_tag(user)}\n"
+        f"Plan: {plan_name}\n"
+        f"Amount: ₹{fmt_inr(paise)}\n"
+        f"UTR: `{utr}`",
+    )
+
+
+async def grant_given(context, user, code: str, plan_name: str, sms_limit: int, method: str) -> None:
+    label = {"gift": "🎁 Gift", "free": "🆓 Free plan", "promo": "🎟 Promo (100%)"}.get(method, method)
+    await post(
+        context,
+        f"{label} *key granted*\n"
+        f"User: {_user_tag(user)}\n"
+        f"Code: `{code}`\n"
+        f"Plan: {plan_name} ({sms_limit} SMS)",
     )
 
 

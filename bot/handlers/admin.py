@@ -14,19 +14,22 @@ from telegram.ext import (
 )
 
 import config
-from services import db, ton
+from services import btc, db, payments, ton
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
 
 
 # Conversation states
-ADD_PLAN_NAME, ADD_PLAN_LIMIT, ADD_PLAN_PRICE, ADD_PLAN_TON = range(4)
+ADD_PLAN_NAME, ADD_PLAN_LIMIT, ADD_PLAN_PRICE, ADD_PLAN_TON, ADD_PLAN_BTC, ADD_PLAN_INR = range(6)
 ADD_KEYS_INPUT = 10
 BROADCAST_INPUT = 20
 SET_ADMIN_USER = 30
 SET_TON = 31
 SET_PLAN_TON = 32
+SET_BTC = 33
+SET_UPI = 34
+SET_PLAN_PRICE = 35
 
 
 def _admin_only(func):
@@ -96,7 +99,11 @@ async def on_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     failed = await db.count_logs("failed")
     revenue = await db.total_revenue_stars()
     revenue_ton = await db.total_revenue_ton_nano()
+    revenue_btc = await db.total_revenue_method("btc", "btc_amount_sats")
+    revenue_inr = await db.total_revenue_method("upi", "upi_amount_paise")
     ton_part = f" + *{ton.fmt_ton(revenue_ton)} TON*" if revenue_ton else ""
+    ton_part += f" + *{btc.fmt_btc(revenue_btc)} BTC*" if revenue_btc else ""
+    ton_part += f" + *₹{payments.fmt_inr(revenue_inr)}*" if revenue_inr else ""
     active_keys = await db.count_active_keys()
     pool = await db.pool_status()
 
@@ -261,12 +268,19 @@ async def on_plans_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines = ["📋 *Plans*\n"]
     for p in plans:
         st = "✅" if p.get("active") else "❌"
-        ton_part = (
-            f" / {ton.fmt_ton(p['price_ton_nano'])} TON" if p.get("price_ton_nano") else ""
-        )
-        lines.append(
-            f"{st} {p['name']} — {p['sms_limit']} SMS — {p['price_stars']}⭐{ton_part}"
-        )
+        extra = ""
+        if p.get("price_ton_nano"):
+            extra += f" / {ton.fmt_ton(p['price_ton_nano'])} TON"
+        if p.get("price_btc_sats"):
+            extra += f" / {btc.fmt_btc(p['price_btc_sats'])} BTC"
+        if p.get("price_inr_paise"):
+            extra += f" / ₹{payments.fmt_inr(p['price_inr_paise'])}"
+        if p.get("is_free"):
+            lines.append(f"{st} {p['name']} — {p['sms_limit']} SMS — 🆓 FREE")
+        else:
+            lines.append(
+                f"{st} {p['name']} — {p['sms_limit']} SMS — {p['price_stars']}⭐{extra}"
+            )
     await q.edit_message_text(
         "\n".join(lines),
         reply_markup=keyboards.admin_plans_menu(),
@@ -303,6 +317,45 @@ async def on_plans_deact_do(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "✅ Plan deactivated." if ok else "❌ Plan not found.",
         reply_markup=keyboards.admin_plans_menu(),
     )
+
+
+@_admin_only
+async def on_plans_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    plans = await db.list_plans(active_only=False)
+    if not plans:
+        await q.edit_message_text("No plans.", reply_markup=keyboards.admin_plans_menu())
+        return
+    await q.edit_message_text(
+        "Choose a plan to switch between FREE and PAID:",
+        reply_markup=keyboards.admin_plans_picker(plans, "free_do"),
+    )
+
+
+@_admin_only
+async def on_plans_free_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    plan = await db.get_plan(q.data.rsplit(":", 1)[1])
+    if not plan or plan.get("deleted"):
+        msg = "❌ Plan not found."
+    elif plan.get("is_free"):
+        if (plan.get("price_stars") or 0) <= 0:
+            msg = (
+                "❌ This plan was created as free and has no Stars price, so it can't be switched "
+                "to paid. Delete it and create a paid plan."
+            )
+        else:
+            await db.set_plan_free(plan["_id"], False)
+            msg = f"✅ '{plan['name']}' is now PAID again."
+    else:
+        await db.set_plan_free(plan["_id"], True)
+        msg = (
+            f"✅ '{plan['name']}' is now FREE: one claim per user. "
+            "Its prices are kept but hidden."
+        )
+    await q.edit_message_text(msg, reply_markup=keyboards.admin_plans_menu())
 
 
 @_admin_only
@@ -409,7 +462,7 @@ async def set_plan_ton_save(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def add_plan_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
     await q.answer()
-    await q.edit_message_text("➕ *Add Plan*\n\nStep 1/4: Plan name?", parse_mode=ParseMode.MARKDOWN)
+    await q.edit_message_text("➕ *Add Plan*\n\nStep 1/6: Plan name?", parse_mode=ParseMode.MARKDOWN)
     return ADD_PLAN_NAME
 
 
@@ -419,7 +472,7 @@ async def add_plan_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("❌ Name must be 1–50 chars. Try again or /cancel.")
         return ADD_PLAN_NAME
     context.user_data["new_plan_name"] = name
-    await update.message.reply_text("Step 2/4: SMS limit (integer > 0)?")
+    await update.message.reply_text("Step 2/6: SMS limit (integer > 0)?")
     return ADD_PLAN_LIMIT
 
 
@@ -432,48 +485,189 @@ async def add_plan_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ Send a positive integer. Try again or /cancel.")
         return ADD_PLAN_LIMIT
     context.user_data["new_plan_limit"] = limit
-    await update.message.reply_text("Step 3/4: Price in Stars (integer > 0)?")
+    await update.message.reply_text("Step 3/6: Price in Stars (integer > 0), or 0 to make this a FREE plan (one claim per user)?")
     return ADD_PLAN_PRICE
 
 
 async def add_plan_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         price = int((update.message.text or "").strip())
-        if price <= 0:
+        if price < 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Send a positive integer. Try again or /cancel.")
+        await update.message.reply_text("❌ Send 0 (free) or a positive integer. Try again or /cancel.")
         return ADD_PLAN_PRICE
+
+    if price == 0:
+        # FREE plan: every user can claim it once; no payment steps needed.
+        name = context.user_data.pop("new_plan_name")
+        limit = context.user_data.pop("new_plan_limit")
+        plan = await db.add_plan(name, limit, 0, is_free=True)
+        await update.message.reply_text(
+            f"✅ FREE plan '{plan['name']}' added: {plan['sms_limit']} SMS (one claim per user).",
+            reply_markup=keyboards.admin_plans_menu(),
+        )
+        await activity_log.plan_added(
+            context, update.effective_user, plan["name"], plan["sms_limit"], 0
+        )
+        return ConversationHandler.END
+
     context.user_data["new_plan_price"] = price
     await update.message.reply_text(
-        "Step 4/4: Price in TON (e.g. 1.5), or 0 to skip TON for this plan?"
+        "Step 4/6: Price in TON (e.g. 1.5), or 0 to skip TON for this plan?"
     )
     return ADD_PLAN_TON
+
+
+def _is_skip(raw: str) -> bool:
+    return raw.strip().lower() in ("0", "skip")
 
 
 async def add_plan_ton(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw = (update.message.text or "").strip()
     price_ton_nano = None
-    if raw.lower() not in ("0", "skip"):
+    if not _is_skip(raw):
         price_ton_nano = ton.parse_ton_amount(raw)
         if price_ton_nano is None:
             await update.message.reply_text(
                 "❌ Send an amount like 1.5 (max 9 decimals), or 0 to skip. Try again or /cancel."
             )
             return ADD_PLAN_TON
+    context.user_data["new_plan_ton"] = price_ton_nano
+    await update.message.reply_text(
+        "Step 5/6: Price in BTC (e.g. 0.0005), or 0 to skip Bitcoin for this plan?"
+    )
+    return ADD_PLAN_BTC
+
+
+async def add_plan_btc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = (update.message.text or "").strip()
+    price_btc_sats = None
+    if not _is_skip(raw):
+        price_btc_sats = btc.parse_btc_amount(raw)
+        if price_btc_sats is None:
+            await update.message.reply_text(
+                "❌ Send an amount like 0.0005 (min 0.00001, max 8 decimals), or 0 to skip. "
+                "Try again or /cancel."
+            )
+            return ADD_PLAN_BTC
+    context.user_data["new_plan_btc"] = price_btc_sats
+    await update.message.reply_text(
+        "Step 6/6: Price in INR for UPI (e.g. 199 or 199.50), or 0 to skip UPI for this plan?"
+    )
+    return ADD_PLAN_INR
+
+
+async def add_plan_inr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = (update.message.text or "").strip()
+    price_inr_paise = None
+    if not _is_skip(raw):
+        price_inr_paise = payments.parse_inr_amount(raw)
+        if price_inr_paise is None:
+            await update.message.reply_text(
+                "❌ Send an amount like 199 or 199.50, or 0 to skip. Try again or /cancel."
+            )
+            return ADD_PLAN_INR
     name = context.user_data.pop("new_plan_name")
     limit = context.user_data.pop("new_plan_limit")
     price = context.user_data.pop("new_plan_price")
-    plan = await db.add_plan(name, limit, price, price_ton_nano)
-    ton_part = f", {ton.fmt_ton(price_ton_nano)} TON" if price_ton_nano else ""
+    price_ton_nano = context.user_data.pop("new_plan_ton", None)
+    price_btc_sats = context.user_data.pop("new_plan_btc", None)
+    plan = await db.add_plan(
+        name, limit, price, price_ton_nano, price_btc_sats, price_inr_paise
+    )
+    extra = ""
+    if price_ton_nano:
+        extra += f", {ton.fmt_ton(price_ton_nano)} TON"
+    if price_btc_sats:
+        extra += f", {btc.fmt_btc(price_btc_sats)} BTC"
+    if price_inr_paise:
+        extra += f", ₹{payments.fmt_inr(price_inr_paise)}"
     await update.message.reply_text(
         f"✅ Plan '{plan['name']}' added: {plan['sms_limit']} SMS, "
-        f"{plan['price_stars']} Stars{ton_part}",
+        f"{plan['price_stars']} Stars{extra}",
         reply_markup=keyboards.admin_plans_menu(),
     )
     await activity_log.plan_added(
         context, update.effective_user, plan["name"], plan["sms_limit"], plan["price_stars"]
     )
+    return ConversationHandler.END
+
+
+# ---- set a plan's BTC / INR price on an existing plan ----
+
+_PRICE_KINDS = {
+    "btc": {
+        "field": "price_btc_sats",
+        "title": "Bitcoin",
+        "parse": btc.parse_btc_amount,
+        "fmt": lambda v: f"{btc.fmt_btc(v)} BTC",
+        "hint": "e.g. 0.0005 (min 0.00001, max 8 decimals)",
+    },
+    "inr": {
+        "field": "price_inr_paise",
+        "title": "UPI (INR)",
+        "parse": payments.parse_inr_amount,
+        "fmt": lambda v: f"₹{payments.fmt_inr(v)}",
+        "hint": "e.g. 199 or 199.50",
+    },
+}
+
+
+@_admin_only
+async def on_plans_pp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    kind = q.data.rsplit(":", 1)[1]
+    plans = await db.list_plans(active_only=True)
+    if not plans:
+        await q.edit_message_text("No active plans.", reply_markup=keyboards.admin_plans_menu())
+        return
+    await q.edit_message_text(
+        f"Choose a plan to set its {_PRICE_KINDS[kind]['title']} price:",
+        reply_markup=keyboards.admin_plans_picker(plans, f"ppd:{kind}"),
+    )
+
+
+@_admin_only
+async def set_plan_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    _, _, _, kind, plan_id = q.data.split(":")
+    context.user_data["pp_kind"] = kind
+    context.user_data["pp_plan"] = plan_id
+    await q.edit_message_text(
+        f"Send the {_PRICE_KINDS[kind]['title']} price for this plan ({_PRICE_KINDS[kind]['hint']}),\n"
+        "or 0 to remove it. /cancel to abort."
+    )
+    return SET_PLAN_PRICE
+
+
+async def set_plan_price_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    kind = context.user_data.get("pp_kind")
+    plan_id = context.user_data.get("pp_plan")
+    if kind not in _PRICE_KINDS or not plan_id:
+        return ConversationHandler.END
+    spec = _PRICE_KINDS[kind]
+    raw = (update.message.text or "").strip()
+    value = None
+    if not _is_skip(raw):
+        value = spec["parse"](raw)
+        if value is None:
+            await update.message.reply_text(
+                f"❌ Invalid amount ({spec['hint']}), or 0 to remove. Try again or /cancel."
+            )
+            return SET_PLAN_PRICE
+    ok = await db.set_plan_price(plan_id, spec["field"], value)
+    context.user_data.pop("pp_kind", None)
+    context.user_data.pop("pp_plan", None)
+    if not ok:
+        msg = "❌ Plan not found."
+    elif value is None:
+        msg = f"✅ {spec['title']} payment removed for this plan."
+    else:
+        msg = f"✅ {spec['title']} price set: {spec['fmt'](value)}."
+    await update.message.reply_text(msg, reply_markup=keyboards.admin_plans_menu())
     return ConversationHandler.END
 
 
@@ -499,7 +693,7 @@ async def on_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         text = (
             f"User: {uname}\n"
             f"Plan: {r['plan_name']} ({r['sms_limit']} SMS)\n"
-            f"Paid: {ton.paid_label(r)}\n"
+            f"Paid: {payments.paid_label(r)}\n"
             f"Keys needed: {r['keys_needed']}\n"
             f"At: {when}\n"
             f"ID: `{r['_id']}`"
@@ -588,9 +782,8 @@ async def _render_settings(q, context):
     text = (
         "⚙️ *Settings*\n\n"
         f"Auto-Approve: *{'ON' if cfg.get('auto_approve') else 'OFF'}*\n"
-        f"Admin Username: *{cfg.get('admin_username') or '—'}*\n"
-        f"TON Payments: *{'ON' if cfg.get('ton_enabled') else 'OFF'}*\n"
-        f"TON Wallet: {'`' + cfg['ton_wallet'] + '`' if cfg.get('ton_wallet') else '*—*'}"
+        f"Admin Username: *{cfg.get('admin_username') or '—'}*\n\n"
+        "Payment methods are under 💳 Payment Methods."
     )
     await q.edit_message_text(
         text, reply_markup=keyboards.admin_settings(cfg), parse_mode=ParseMode.MARKDOWN
@@ -606,31 +799,88 @@ async def settings_toggle_auto(update: Update, context: ContextTypes.DEFAULT_TYP
     await _render_settings(q, context)
 
 
-@_admin_only
-async def settings_toggle_ton(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
+_METHOD_LABELS = {"stars": "Stars", "ton": "TON", "btc": "Bitcoin", "upi": "UPI"}
+_METHOD_PRICE_FIELD = {
+    "stars": "price_stars",
+    "ton": "price_ton_nano",
+    "btc": "price_btc_sats",
+    "upi": "price_inr_paise",
+}
+_METHOD_PRICE_HINT = {
+    "ton": "Plans → Set TON Price",
+    "btc": "Plans → Set BTC Price",
+    "upi": "Plans → Set UPI (INR) Price",
+}
+
+
+async def _render_payments(q, context) -> None:
     cfg = await db.get_config()
-    if cfg.get("ton_enabled"):
-        await db.update_config(ton_enabled=False)
-        await q.answer("TON payments turned OFF. Users now see Stars only.")
+
+    def st(key: str, default: bool = False) -> str:
+        return "ON" if cfg.get(key, default) else "OFF"
+
+    wallet = await ton.get_wallet(cfg)
+    address = await btc.get_address(cfg)
+    upi_id = cfg.get("upi_id") if payments.is_valid_upi_id(cfg.get("upi_id") or "") else None
+
+    def code(v) -> str:
+        return f"`{v}`" if v else "*—*"
+
+    text = (
+        "💳 *Payment Methods*\n\n"
+        f"⭐ Stars: *{st('stars_enabled', True)}*\n"
+        f"💎 TON: *{st('ton_enabled')}* — wallet: {code(wallet)}\n"
+        f"₿ Bitcoin: *{st('btc_enabled')}* — address: {code(address)}\n"
+        f"🇮🇳 UPI: *{st('upi_enabled')}* — ID: {code(upi_id)}\n\n"
+        "Users see a method only when it is ON, configured, and the plan has a price for it "
+        "(set prices under Plans)."
+    )
+    await q.edit_message_text(
+        text, reply_markup=keyboards.admin_payments_menu(cfg), parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@_admin_only
+async def on_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await _render_payments(q, context)
+
+
+@_admin_only
+async def on_pay_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    method = q.data.rsplit(":", 1)[1]
+    label = _METHOD_LABELS[method]
+    key = f"{method}_enabled"
+    cfg = await db.get_config()
+
+    if cfg.get(key, method == "stars"):
+        await db.update_config(**{key: False})
+        await q.answer(f"{label} payments turned OFF.")
     else:
-        if await ton.get_wallet() is None:
-            await q.answer(
-                "Set a valid TON wallet first (Set TON Wallet), then turn TON on.",
-                show_alert=True,
-            )
+        missing = None
+        if method == "ton" and await ton.get_wallet(cfg) is None:
+            missing = "Set a valid TON wallet first (Set TON Wallet), then turn TON on."
+        elif method == "btc" and await btc.get_address(cfg) is None:
+            missing = "Set a valid Bitcoin address first (Set BTC Address), then turn Bitcoin on."
+        elif method == "upi" and not payments.is_valid_upi_id(cfg.get("upi_id") or ""):
+            missing = "Set your UPI ID first (Set UPI ID), then turn UPI on."
+        if missing:
+            await q.answer(missing, show_alert=True)
             return
-        await db.update_config(ton_enabled=True)
+        await db.update_config(**{key: True})
         plans = await db.list_plans(active_only=True)
-        if any(p.get("price_ton_nano") for p in plans):
-            await q.answer("TON payments turned ON.")
-        else:
+        field = _METHOD_PRICE_FIELD[method]
+        if method != "stars" and not any(p.get(field) for p in plans):
             await q.answer(
-                "TON is ON, but no active plan has a TON price yet. "
-                "Use Plans → Set TON Price, otherwise users only see Stars.",
+                f"{label} is ON, but no active plan has a {label} price yet. "
+                f"Use {_METHOD_PRICE_HINT[method]}, otherwise users won't see it.",
                 show_alert=True,
             )
-    await _render_settings(q, context)
+        else:
+            await q.answer(f"{label} payments turned ON.")
+    await _render_payments(q, context)
 
 
 @_admin_only
@@ -687,10 +937,82 @@ async def set_ton_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
+@_admin_only
+async def set_btc_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "Send your Bitcoin receiving address (mainnet: starts with 1, 3 or bc1), "
+        "or 'clear'. Use an address you control. /cancel to abort."
+    )
+    return SET_BTC
+
+
+async def set_btc_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = (update.message.text or "").strip()
+    if raw.lower() == "clear":
+        await db.update_config(btc_address=None, btc_enabled=False)
+        await update.message.reply_text(
+            "✅ Bitcoin address cleared and Bitcoin payments turned OFF.",
+            reply_markup=keyboards.admin_back(),
+        )
+        return ConversationHandler.END
+    if not btc.is_valid_address(raw):
+        await update.message.reply_text(
+            "❌ That's not a valid Bitcoin mainnet address (wrong format or bad checksum). "
+            "Try again or /cancel."
+        )
+        return SET_BTC
+    address = btc.normalize_address(raw)
+    await db.update_config(btc_address=address)
+    await update.message.reply_text(
+        f"✅ Bitcoin address saved: `{address}`",
+        reply_markup=keyboards.admin_back(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
+@_admin_only
+async def set_upi_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "Send your UPI ID (like name@bank), or 'clear'. /cancel to abort."
+    )
+    return SET_UPI
+
+
+async def set_upi_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = (update.message.text or "").strip()
+    if raw.lower() == "clear":
+        await db.update_config(upi_id=None, upi_enabled=False)
+        await update.message.reply_text(
+            "✅ UPI ID cleared and UPI payments turned OFF.",
+            reply_markup=keyboards.admin_back(),
+        )
+        return ConversationHandler.END
+    if not payments.is_valid_upi_id(raw):
+        await update.message.reply_text(
+            "❌ That doesn't look like a UPI ID (expected name@bank). Try again or /cancel."
+        )
+        return SET_UPI
+    await db.update_config(upi_id=raw)
+    await update.message.reply_text(
+        f"✅ UPI ID saved: `{raw}`",
+        reply_markup=keyboards.admin_back(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
 # ---------- shared cancel ----------
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    for k in ("new_plan_name", "new_plan_limit", "new_plan_price", "tonp_plan_id"):
+    for k in (
+        "new_plan_name", "new_plan_limit", "new_plan_price", "new_plan_ton", "new_plan_btc",
+        "tonp_plan_id", "pp_kind", "pp_plan",
+    ):
         context.user_data.pop(k, None)
     await update.effective_message.reply_text(
         "❎ Cancelled.", reply_markup=keyboards.main_reply_keyboard()
@@ -700,7 +1022,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def menu_button_exit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User tapped a main-menu reply-keyboard button mid admin flow → exit."""
-    for k in ("new_plan_name", "new_plan_limit", "new_plan_price", "tonp_plan_id"):
+    for k in (
+        "new_plan_name", "new_plan_limit", "new_plan_price", "new_plan_ton", "new_plan_btc",
+        "tonp_plan_id", "pp_kind", "pp_plan",
+    ):
         context.user_data.pop(k, None)
     await update.effective_message.reply_text(
         "↩️ Exited admin flow — tap your selection again.",
@@ -729,6 +1054,8 @@ def register(app) -> None:
                 ADD_PLAN_LIMIT: text_state(add_plan_limit),
                 ADD_PLAN_PRICE: text_state(add_plan_price),
                 ADD_PLAN_TON: text_state(add_plan_ton),
+                ADD_PLAN_BTC: text_state(add_plan_btc),
+                ADD_PLAN_INR: text_state(add_plan_inr),
             },
             fallbacks=[CommandHandler("cancel", cancel)],
             name="admin_add_plan",
@@ -811,6 +1138,39 @@ def register(app) -> None:
         )
     )
 
+    # Conversations: BTC address, UPI ID, per-plan BTC/INR price
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[CallbackQueryHandler(set_btc_start, pattern=r"^adm:pay:set_btc$")],
+            states={SET_BTC: text_state(set_btc_save)},
+            fallbacks=[CommandHandler("cancel", cancel)],
+            name="admin_set_btc",
+            persistent=False,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[CallbackQueryHandler(set_upi_start, pattern=r"^adm:pay:set_upi$")],
+            states={SET_UPI: text_state(set_upi_save)},
+            fallbacks=[CommandHandler("cancel", cancel)],
+            name="admin_set_upi",
+            persistent=False,
+        )
+    )
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(
+                    set_plan_price_start, pattern=r"^adm:plans:ppd:(btc|inr):[a-f0-9]+$"
+                )
+            ],
+            states={SET_PLAN_PRICE: text_state(set_plan_price_save)},
+            fallbacks=[CommandHandler("cancel", cancel)],
+            name="admin_set_plan_price",
+            persistent=False,
+        )
+    )
+
     # Plain callbacks
     app.add_handler(CallbackQueryHandler(on_home, pattern=r"^adm:home$"))
     app.add_handler(CallbackQueryHandler(on_users, pattern=r"^adm:users$"))
@@ -822,6 +1182,10 @@ def register(app) -> None:
     app.add_handler(CallbackQueryHandler(on_plans_list, pattern=r"^adm:plans:list$"))
     app.add_handler(CallbackQueryHandler(on_plans_deact, pattern=r"^adm:plans:deact$"))
     app.add_handler(CallbackQueryHandler(on_plans_tonp, pattern=r"^adm:plans:tonp$"))
+    app.add_handler(CallbackQueryHandler(on_plans_free, pattern=r"^adm:plans:free$"))
+    app.add_handler(
+        CallbackQueryHandler(on_plans_free_do, pattern=r"^adm:plans:free_do:[a-f0-9]+$")
+    )
     app.add_handler(CallbackQueryHandler(on_plans_del, pattern=r"^adm:plans:del$"))
     app.add_handler(
         CallbackQueryHandler(on_plans_del_do, pattern=r"^adm:plans:del_do:[a-f0-9]+$")
@@ -838,6 +1202,8 @@ def register(app) -> None:
     app.add_handler(
         CallbackQueryHandler(settings_toggle_auto, pattern=r"^adm:settings:toggle_auto$")
     )
+    app.add_handler(CallbackQueryHandler(on_payments, pattern=r"^adm:pay$"))
     app.add_handler(
-        CallbackQueryHandler(settings_toggle_ton, pattern=r"^adm:settings:toggle_ton$")
+        CallbackQueryHandler(on_pay_toggle, pattern=r"^adm:pay:t:(stars|ton|btc|upi)$")
     )
+    app.add_handler(CallbackQueryHandler(on_plans_pp, pattern=r"^adm:plans:pp:(btc|inr)$"))

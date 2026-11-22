@@ -2,6 +2,7 @@
 import json
 import logging
 from math import ceil
+from types import SimpleNamespace
 
 from bson import ObjectId
 from telegram import LabeledPrice, Update
@@ -16,7 +17,7 @@ from telegram.ext import (
 )
 
 import config
-from services import db, key_generator, ton
+from services import db, key_generator, payments, promo
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -35,15 +36,9 @@ async def on_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboards.back_to_menu(),
         )
     else:
-        ton_enabled = await ton.is_enabled()
-        pay_text = (
-            "Pay with Telegram Stars ⭐ or TON 💎."
-            if ton_enabled
-            else "Pay in Telegram Stars ⭐."
-        )
         body, markup = (
-            f"🛒 *Choose a plan*\n\n{pay_text}",
-            keyboards.plans_keyboard(plans, ton_enabled=ton_enabled),
+            "🛒 *Choose a plan*\n\nYou'll pick how to pay next.",
+            keyboards.plans_keyboard(plans),
         )
 
     if update.callback_query:
@@ -59,6 +54,38 @@ async def on_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text(
             body, reply_markup=markup, parse_mode=ParseMode.MARKDOWN
         )
+
+
+async def build_method_screen(plan: dict, user_id: int) -> tuple[str, object]:
+    """What the user sees after picking a plan: the free-claim screen, or payment methods
+    (each with its price, discounted if they applied a promo code)."""
+    if plan.get("is_free"):
+        claimed = await db.has_free_claim(user_id, str(plan["_id"]))
+        text = f"🎁 *{plan['name']}* • {plan['sms_limit']} SMS\n\nThis plan is *free* — one per user."
+        if claimed:
+            text += "\n\n✅ You've already claimed it."
+        return text, keyboards.free_plan_screen(str(plan["_id"]), claimed)
+
+    plan = await promo.priced_plan(plan, user_id)
+    methods = await payments.available_methods(plan)
+    has_promos = await db.has_active_promos()
+    if not methods and not has_promos:
+        return (
+            "❌ No payment method is available for this plan right now. Please contact admin.",
+            keyboards.back_to_menu(),
+        )
+    note = (
+        f"\n🎟 Code `{plan['promo_code']}` applied: {plan['promo_percent']}% off"
+        if plan.get("promo_code")
+        else ""
+    )
+    body = (
+        "Choose how to pay:"
+        if methods
+        else "❌ No payment method is available for this plan right now."
+    )
+    text = f"💳 *{plan['name']}* • {plan['sms_limit']} SMS{note}\n\n{body}"
+    return text, keyboards.payment_methods(plan, methods, promo_button=has_promos)
 
 
 async def on_buy_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -77,16 +104,10 @@ async def on_buy_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # TON offered only if the admin enabled it, a wallet is set and the plan has a TON price.
-    if plan.get("price_ton_nano") and await ton.is_enabled():
-        await q.edit_message_text(
-            f"💳 *{plan['name']}* • {plan['sms_limit']} SMS\n\nChoose how to pay:",
-            reply_markup=keyboards.payment_methods(plan),
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    await _send_stars_invoice(update, context, plan)
+    # Always ask for the payment method (prices are on the buttons). A method is listed only if
+    # the admin enabled it, it is configured, and this plan has a price in that currency.
+    text, markup = await build_method_screen(plan, user_id)
+    await q.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
 
 async def on_pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,6 +122,13 @@ async def on_pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             reply_markup=keyboards.back_to_menu(),
         )
         return
+    if payments.STARS not in await payments.available_methods(plan):
+        await q.edit_message_text(
+            "❌ Stars payments aren't available for this plan right now.",
+            reply_markup=keyboards.back_to_menu(),
+        )
+        return
+    plan = await promo.priced_plan(plan, update.effective_user.id)
     await _send_stars_invoice(update, context, plan)
 
 
@@ -110,14 +138,17 @@ async def _send_stars_invoice(
     q = update.callback_query
     user_id = update.effective_user.id
     payload = json.dumps(
-        {"plan_id": str(plan["_id"]), "telegram_id": user_id}
+        {"plan_id": str(plan["_id"]), "telegram_id": user_id, "promo": plan.get("promo_code")}
     )
+    desc = f"{plan['sms_limit']} SMS sends"
+    if plan.get("promo_code"):
+        desc += f" (🎟 {plan['promo_code']} −{plan['promo_percent']}%)"
 
     try:
         await context.bot.send_invoice(
             chat_id=update.effective_chat.id,
             title=f"🔑 {plan['name']} Plan",
-            description=f"{plan['sms_limit']} SMS sends",
+            description=desc,
             payload=payload,
             provider_token="",  # Stars uses empty provider token
             currency="XTR",
@@ -172,6 +203,7 @@ async def on_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
         payment_charge_id=sp.telegram_payment_charge_id,
     )
     await activity_log.payment_received(context, user, plan["name"], sp.total_amount)
+    await promo.finalize(payload.get("promo"), user.id)
 
     cfg = await db.get_config()
     keys_needed = request["keys_needed"]
@@ -234,7 +266,9 @@ async def _auto_fulfill(
     )
 
 
-async def assign_key_for_request(context, user, request: dict, plan: dict) -> str:
+async def assign_key_for_request(
+    context, user, request: dict, plan: dict, *, log_it: bool = True
+) -> str:
     """Generate a code, reserve provider keys, create the user key, approve the request.
 
     Returns the code; raises on failure. Shared by non-Stars payment paths (TON).
@@ -243,10 +277,72 @@ async def assign_key_for_request(context, user, request: dict, plan: dict) -> st
     reserved_ids = await db.reserve_keys_for(code, request["keys_needed"])
     await db.create_user_key(code, user.id, plan, reserved_ids)
     await db.set_purchase_status(request["_id"], "approved")
-    await activity_log.key_assigned(
-        context, user, code, plan["name"], plan["sms_limit"], auto=True
-    )
+    if log_it:
+        await activity_log.key_assigned(
+            context, user, code, plan["name"], plan["sms_limit"], auto=True
+        )
     return code
+
+
+async def deliver_paid_request(
+    bot,
+    user,
+    plan: dict,
+    request: dict,
+    *,
+    allow_auto: bool = True,
+    pending_text: str | None = None,
+) -> None:
+    """After a payment is confirmed: assign the key now (auto-approve) or queue it for an admin.
+
+    allow_auto=False forces manual approval (UPI). `pending_text` overrides what the user is
+    told while the request waits for an admin.
+    """
+    ctx = SimpleNamespace(bot=bot)
+    cfg = await db.get_config()
+    pool_ok = await db.free_keys_count() >= request["keys_needed"]
+
+    async def tell(text: str, markdown: bool = False, markup=None) -> None:
+        try:
+            await bot.send_message(
+                chat_id=user.id,
+                text=text,
+                reply_markup=markup or keyboards.back_to_menu(),
+                parse_mode=ParseMode.MARKDOWN if markdown else None,
+            )
+        except TelegramError as e:
+            log.warning("notify user %s failed: %s", user.id, e)
+
+    if allow_auto and pool_ok and cfg.get("auto_approve"):
+        try:
+            code = await assign_key_for_request(ctx, user, request, plan)
+        except Exception:
+            log.exception("Auto-fulfil failed for request %s", request["_id"])
+            await tell("⚠️ Could not assign your key automatically. Admin has been notified.")
+            await _notify_admins_pending(ctx, user, plan, request, pool_ok=False)
+            return
+        await tell(
+            f"🎉 *Your key is ready!*\n\n"
+            f"Code: `{code}`\n"
+            f"Plan: {plan['name']}\n"
+            f"SMS: {plan['sms_limit']} sends\n\n"
+            "Use /menu to start sending.",
+            markdown=True,
+        )
+        return
+
+    await _notify_admins_pending(ctx, user, plan, request, pool_ok=pool_ok)
+    if pending_text:
+        await tell(pending_text)
+    elif pool_ok:
+        await tell("⏳ Payment received! Your key will be assigned shortly.")
+    else:
+        admin_user = (cfg.get("admin_username") or "").lstrip("@")
+        contact = f"@{admin_user}" if admin_user else "admin"
+        await tell(
+            f"✅ Payment received! Please contact {contact} to complete your setup.",
+            markup=keyboards.contact_admin_button(admin_user or None),
+        )
 
 
 async def _notify_admins_pending(
@@ -262,14 +358,14 @@ async def _notify_admins_pending(
             "🔔 *New purchase awaits approval*\n\n"
             f"User: {uname}\n"
             f"Plan: {plan['name']} ({plan['sms_limit']} SMS)\n"
-            f"Paid: {ton.paid_label(request)}\n"
+            f"Paid: {payments.paid_label(request)}\n"
             f"Keys needed: {request['keys_needed']}\n"
             f"Request ID: `{request['_id']}`"
         )
     else:
         text = (
             "🚨 *ACTION NEEDED*\n\n"
-            f"User: {uname} paid *{ton.paid_label(request)}* for *{plan['name']}*.\n"
+            f"User: {uname} paid *{payments.paid_label(request)}* for *{plan['name']}*.\n"
             f"Keys needed: {request['keys_needed']} — *no keys available*.\n"
             "Add keys, then approve manually.\n\n"
             f"Request ID: `{request['_id']}`"
@@ -314,12 +410,9 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     keys_needed = request["keys_needed"]
     free = await db.free_keys_count()
     if free < keys_needed:
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         await q.edit_message_text(
             "⚠️ Still no keys available. Add keys first.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("➕ Add Keys", callback_data="adm:pk:add")]]
-            ),
+            reply_markup=keyboards.admin_pk_menu(),
         )
         return
 
@@ -418,15 +511,15 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
         await q.edit_message_text("⚠️ Request no longer pending.")
         return
 
-    is_ton = request.get("payment_method") == "ton"
+    manual_refund = request.get("payment_method") in payments.MANUAL_REFUND_METHODS
     refund_ok = True
     refund_err = None
-    if is_ton:
-        # The Bot API can't refund on-chain transfers: the admin sends it back manually.
+    if manual_refund:
+        # The Bot API can't refund on-chain or UPI payments: the admin sends it back manually.
         refund_ok = False
         refund_err = (
-            f"TON payment — refund manually: {ton.paid_label(request)}, "
-            f"tx {request.get('ton_tx_hash')}"
+            f"{(request.get('payment_method') or '').upper()} payment — refund manually: "
+            f"{payments.paid_label(request)}, ref {payments.payment_ref(request)}"
         )
     else:
         try:
@@ -463,9 +556,9 @@ async def admin_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=request["telegram_id"],
                 text=(
-                    "❌ Your purchase was rejected. Your TON payment will be returned "
+                    "❌ Your purchase was rejected. Your payment will be returned "
                     "manually — please contact admin."
-                    if is_ton
+                    if manual_refund
                     else "❌ Your purchase was rejected. Refund failed automatically — "
                     "please contact admin."
                 ),

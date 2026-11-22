@@ -277,3 +277,42 @@ not a payment method for bots, so TON payments are verified on-chain:
 Notes: underpaid transfers and transfers with an unknown memo are reported to admins, not fulfilled.
 TON payments are not refunded automatically — rejecting a TON purchase tells you the amount and
 transaction to send back manually. The comment must be sent exactly as shown.
+
+## Payment methods (Stars, TON, Bitcoin, UPI)
+
+Everything is configurable from `/admin` -> Settings -> **Payment Methods**: switch each method
+ON/OFF and set its wallet/address/ID. A user sees a method only when it is ON, configured, and the
+plan has a price in that currency (set under Plans: Add Plan, Set TON/BTC/UPI Price).
+After choosing a plan the user always picks a payment method; prices are shown on those buttons.
+
+| Method | Verification | Refund on reject |
+|---|---|---|
+| ⭐ Stars | automatic (Telegram invoice) | automatic |
+| 💎 TON (also covers GRAM/Toncoin) | automatic, unique comment per order | manual |
+| ₿ Bitcoin | automatic, unique amount per order, `BTC_MIN_CONFIRMATIONS` confirmations | manual |
+| 🇮🇳 UPI | manual: user submits UTR (+ screenshot), admin approves | manual |
+
+Bitcoin: set your address in Payment Methods. Each order gets the plan price plus a few extra sats
+(unique among open orders) because Bitcoin has no memo — the exact amount identifies the order.
+Lookups use `BTC_API_URLS` (mempool.space, then blockstream.info as fallback).
+Near-miss payments (right order, slightly wrong amount) are reported to admins, not fulfilled.
+
+UPI: never auto-approved. Each UTR can be submitted once, and a user can have at most
+3 unreviewed submissions.
+
+## Free keys: gifts, free plans, promo codes
+
+All three are in `/admin` and all draw from the same provider-key pool, so they only work while the pool
+has free keys (otherwise the user/admin gets an "out of stock" message and nothing is consumed).
+
+* **🎁 Gift Key** — pick a user (Telegram ID or @username; they must have started the bot) and a plan; the bot
+  assigns the key and messages them. Recorded as `gift`, counts as no revenue.
+* **🆓 Free plan** — Add Plan with a Stars price of `0`, or Plans -> Free ↔ Paid on an existing plan. Every user
+  can claim it once (per plan) from Buy Key. Use it as a trial.
+* **🎟 Promo codes** — Promo Codes -> New Code: percent off (100 = free key), max total uses, expiry, and optionally
+  one user only (the way to give something to a specific person). Each user can redeem a code once.
+  * 100% codes grant a free key immediately.
+  * Partial discounts reduce every price of that plan (Stars, TON, BTC, UPI) for 60 minutes; the use is counted
+    when the payment is confirmed (a payment already in progress is honoured even if the code ran out).
+  * Wrong guesses are rate-limited (8 per 10 minutes per user) and a code restricted to another user looks
+    exactly like an invalid one.

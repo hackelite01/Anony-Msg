@@ -32,5 +32,7 @@ services:
         sync: false
       - key: TONCENTER_API_KEY
         sync: false
+      - key: BTC_MIN_CONFIRMATIONS
+        value: 1
       - key: PORT
         value: 8000

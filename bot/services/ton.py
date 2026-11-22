@@ -81,9 +81,9 @@ def friendly(addr: str) -> str:
     return base64.urlsafe_b64encode(body + _crc16(body).to_bytes(2, "big")).decode()
 
 
-async def get_wallet() -> Optional[str]:
+async def get_wallet(cfg: Optional[dict] = None) -> Optional[str]:
     """Receiving wallet (admin setting, else env fallback). None if unset/invalid."""
-    cfg = await db.get_config()
+    cfg = cfg if cfg is not None else await db.get_config()
     wallet = (cfg.get("ton_wallet") or config.TON_WALLET_ADDRESS or "").strip()
     if wallet and parse_address(wallet) is not None:
         return wallet

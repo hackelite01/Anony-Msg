@@ -14,7 +14,19 @@ from telegram.ext import (
 )
 
 import config
-from handlers import admin, mykeys, purchase, sms, start, support, ton_purchase
+from handlers import (
+    admin,
+    btc_purchase,
+    grants,
+    mykeys,
+    promo,
+    purchase,
+    sms,
+    start,
+    support,
+    ton_purchase,
+    upi_purchase,
+)
 from services import db
 from utils import activity_log, keyboards
 
@@ -162,6 +174,10 @@ def _build_application() -> Application:
     application.add_handler(sms.build_conversation())
     purchase.register(application)
     ton_purchase.register(application)
+    btc_purchase.register(application)
+    upi_purchase.register(application)
+    grants.register(application)
+    promo.register(application)
     support.register(application)
     admin.register(application)
 
@@ -200,6 +216,7 @@ async def _run_polling(application: Application) -> None:
     await application.start()
     await _channel_self_check(application)
     ton_purchase.start_watcher(application)
+    btc_purchase.start_watcher(application)
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     log.info("Polling started — send /start to your bot in Telegram")
     stop_event = asyncio.Event()
@@ -208,6 +225,7 @@ async def _run_polling(application: Application) -> None:
     finally:
         log.info("Shutting down")
         await ton_purchase.stop_watcher()
+        await btc_purchase.stop_watcher()
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
@@ -233,6 +251,7 @@ async def _run_webhook(application: Application) -> None:
     await application.start()
     await _channel_self_check(application)
     ton_purchase.start_watcher(application)
+    btc_purchase.start_watcher(application)
 
     web_app = web.Application()
     web_app.router.add_post(config.WEBHOOK_PATH, build_webhook_handler(application))
@@ -251,6 +270,7 @@ async def _run_webhook(application: Application) -> None:
     finally:
         log.info("Shutting down")
         await ton_purchase.stop_watcher()
+        await btc_purchase.stop_watcher()
         await application.stop()
         await application.shutdown()
         await runner.cleanup()

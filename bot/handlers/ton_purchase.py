@@ -28,7 +28,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 
 import config
 from handlers import purchase
-from services import db, ton
+from services import db, promo, ton
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -106,6 +106,7 @@ async def on_pay_ton(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
+    plan = await promo.priced_plan(plan, user.id)  # discounted if the user applied a promo code
     since = db.now_utc() - timedelta(minutes=config.TON_ORDER_TTL_MINUTES)
     order = await db.find_open_ton_order(user.id, plan["_id"], since)
     if order and (order["wallet"] != wallet or order["amount_nano"] != plan["price_ton_nano"]):
@@ -120,6 +121,7 @@ async def on_pay_ton(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             amount_nano=plan["price_ton_nano"],
             memo=ton.new_memo(),
             wallet=wallet,
+            promo=plan.get("promo_code"),
         )
 
     try:
@@ -271,6 +273,7 @@ async def _fulfill_order(bot, order: dict) -> None:
         return
 
     request = await db.create_ton_purchase_request(order, plan)
+    await promo.finalize(order.get("promo"), order["telegram_id"])
     await db.set_ton_order_status(order["_id"], "fulfilled")  # a purchase request exists from here on
     if request["status"] != "pending":
         return
