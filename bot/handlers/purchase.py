@@ -17,7 +17,8 @@ from telegram.ext import (
 )
 
 import config
-from services import db, key_generator, payments, promo
+from services import db, payments, promo
+from services import keys as keystock
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -241,9 +242,9 @@ async def _auto_fulfill(
 ) -> None:
     user = update.effective_user
     try:
-        code = await key_generator.generate_unique_code()
-        reserved_ids = await db.reserve_keys_for(code, request["keys_needed"])
-        await db.create_user_key(code, user.id, plan, reserved_ids)
+        codes = await keystock.issue_keys(
+            str(request["_id"]), user.id, plan, request["keys_needed"]
+        )
         await db.set_purchase_status(request["_id"], "approved")
     except Exception as e:
         log.exception("Auto-fulfill failed: %s", e)
@@ -253,14 +254,10 @@ async def _auto_fulfill(
         await _notify_admins_pending(context, user, plan, request, pool_ok=False)
         return
 
-    await activity_log.key_assigned(context, user, code, plan["name"], plan["sms_limit"], auto=True)
+    await activity_log.key_assigned(context, user, codes, plan["name"], plan["sms_limit"], auto=True)
 
     await update.message.reply_text(
-        f"🎉 *Your key is ready!*\n\n"
-        f"Code: `{code}`\n"
-        f"Plan: {plan['name']}\n"
-        f"SMS: {plan['sms_limit']} sends\n\n"
-        "Use /menu to start sending.",
+        keystock.key_message(codes, plan, "🎉 *Your key is ready!*", await keystock.web_url()),
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboards.back_to_menu(),
     )
@@ -268,20 +265,21 @@ async def _auto_fulfill(
 
 async def assign_key_for_request(
     context, user, request: dict, plan: dict, *, log_it: bool = True
-) -> str:
-    """Generate a code, reserve provider keys, create the user key, approve the request.
+) -> list[str]:
+    """Take the needed identifiers from stock for the buyer and approve the request.
 
-    Returns the code; raises on failure. Shared by non-Stars payment paths (TON).
+    Returns the identifiers; raises on failure (nothing stays reserved). Shared by the non-Stars
+    payment paths (TON, BTC) and by gifts / free plans / promo grants.
     """
-    code = await key_generator.generate_unique_code()
-    reserved_ids = await db.reserve_keys_for(code, request["keys_needed"])
-    await db.create_user_key(code, user.id, plan, reserved_ids)
+    codes = await keystock.issue_keys(
+        str(request["_id"]), user.id, plan, request["keys_needed"]
+    )
     await db.set_purchase_status(request["_id"], "approved")
     if log_it:
         await activity_log.key_assigned(
-            context, user, code, plan["name"], plan["sms_limit"], auto=True
+            context, user, codes, plan["name"], plan["sms_limit"], auto=True
         )
-    return code
+    return codes
 
 
 async def deliver_paid_request(
@@ -315,18 +313,14 @@ async def deliver_paid_request(
 
     if allow_auto and pool_ok and cfg.get("auto_approve"):
         try:
-            code = await assign_key_for_request(ctx, user, request, plan)
+            codes = await assign_key_for_request(ctx, user, request, plan)
         except Exception:
             log.exception("Auto-fulfil failed for request %s", request["_id"])
             await tell("⚠️ Could not assign your key automatically. Admin has been notified.")
             await _notify_admins_pending(ctx, user, plan, request, pool_ok=False)
             return
         await tell(
-            f"🎉 *Your key is ready!*\n\n"
-            f"Code: `{code}`\n"
-            f"Plan: {plan['name']}\n"
-            f"SMS: {plan['sms_limit']} sends\n\n"
-            "Use /menu to start sending.",
+            keystock.key_message(codes, plan, "🎉 *Your key is ready!*", await keystock.web_url()),
             markdown=True,
         )
         return
@@ -422,9 +416,9 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        code = await key_generator.generate_unique_code()
-        reserved_ids = await db.reserve_keys_for(code, keys_needed)
-        await db.create_user_key(code, request["telegram_id"], plan, reserved_ids)
+        codes = await keystock.issue_keys(
+            str(req_id), request["telegram_id"], plan, keys_needed
+        )
         await db.set_purchase_status(req_id, "approved")
     except Exception as e:
         log.exception("Manual approve failed: %s", e)
@@ -434,7 +428,7 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await activity_log.key_assigned(
         context,
         {"telegram_id": request["telegram_id"], "username": request.get("username")},
-        code,
+        codes,
         plan["name"],
         plan["sms_limit"],
         auto=False,
@@ -443,12 +437,8 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         await context.bot.send_message(
             chat_id=request["telegram_id"],
-            text=(
-                f"🎉 *Your key is ready!*\n\n"
-                f"Code: `{code}`\n"
-                f"Plan: {plan['name']}\n"
-                f"SMS: {plan['sms_limit']} sends\n\n"
-                "Use /menu to start sending."
+            text=keystock.key_message(
+                codes, plan, "🎉 *Your key is ready!*", await keystock.web_url()
             ),
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -456,7 +446,9 @@ async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         log.warning("Notify user failed: %s", e)
 
     await q.edit_message_text(
-        f"✅ Approved. Key `{code}` assigned to user {request['telegram_id']}.",
+        f"✅ Approved. {len(codes)} key(s) "
+        f"({', '.join('`' + keystock.mask(c) + '`' for c in codes)}) "
+        f"assigned to user {request['telegram_id']}.",
         parse_mode=ParseMode.MARKDOWN,
     )
 

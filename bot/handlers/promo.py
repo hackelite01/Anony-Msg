@@ -24,6 +24,7 @@ from telegram.ext import (
 from handlers import grants, purchase
 from handlers.admin import _admin_only
 from services import db, promo
+from services import keys as keystock
 from utils import keyboards
 
 log = logging.getLogger(__name__)
@@ -262,7 +263,9 @@ async def promo_got(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             )
             return ConversationHandler.END
         await update.message.reply_text(
-            grants.key_message(key, plan, f"🎟 *Code {code} applied — your key is free!*"),
+            keystock.key_message(
+                key, plan, f"🎟 *Code {code} applied — your key is free!*", await keystock.web_url()
+            ),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboards.main_reply_keyboard(),
         )

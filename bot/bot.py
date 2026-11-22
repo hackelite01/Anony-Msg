@@ -171,7 +171,7 @@ def _build_application() -> Application:
 
     start.register(application)
     mykeys.register(application)
-    application.add_handler(sms.build_conversation())
+    sms.register(application)
     purchase.register(application)
     ton_purchase.register(application)
     btc_purchase.register(application)

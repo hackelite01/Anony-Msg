@@ -23,6 +23,7 @@ from telegram.ext import (
 from handlers import purchase
 from handlers.admin import _admin_only
 from services import db
+from services import keys as keystock
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -32,30 +33,20 @@ class OutOfStock(RuntimeError):
     """Not enough free provider keys to cover this grant."""
 
 
-async def grant_key(bot, user, plan: dict, *, method: str, extra: Optional[dict] = None) -> str:
-    """Create and return a key code for an unpaid grant. Raises OutOfStock / other on failure."""
+async def grant_key(bot, user, plan: dict, *, method: str, extra: Optional[dict] = None) -> list[str]:
+    """Create and return the key identifier(s) for an unpaid grant. Raises OutOfStock / other."""
     request = await db.create_grant_request(user.id, user.username or "", plan, method, extra)
     if await db.free_keys_count() < request["keys_needed"]:
         await db.set_purchase_status(request["_id"], "rejected", "out_of_stock")
-        raise OutOfStock(f"need {request['keys_needed']} free provider keys")
+        raise OutOfStock(f"need {request['keys_needed']} free keys in stock")
     ctx = SimpleNamespace(bot=bot)
     try:
-        code = await purchase.assign_key_for_request(ctx, user, request, plan, log_it=False)
+        codes = await purchase.assign_key_for_request(ctx, user, request, plan, log_it=False)
     except Exception:
         await db.set_purchase_status(request["_id"], "rejected", "grant_failed")
         raise
-    await activity_log.grant_given(ctx, user, code, plan["name"], plan["sms_limit"], method)
-    return code
-
-
-def key_message(code: str, plan: dict, title: str) -> str:
-    return (
-        f"{title}\n\n"
-        f"Code: `{code}`\n"
-        f"Plan: {plan['name']}\n"
-        f"SMS: {plan['sms_limit']} sends\n\n"
-        "Use /menu to start sending."
-    )
+    await activity_log.grant_given(ctx, user, codes, plan["name"], plan["sms_limit"], method)
+    return codes
 
 
 def _tag(uid: int, username: Optional[str]) -> str:
@@ -86,7 +77,7 @@ async def on_free_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        code = await grant_key(context.bot, user, plan, method="free")
+        codes = await grant_key(context.bot, user, plan, method="free")
     except Exception as e:
         await db.release_free_claim(user.id, plan_id)  # let them try again later
         if not isinstance(e, OutOfStock):
@@ -98,7 +89,7 @@ async def on_free_claim(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await q.edit_message_text(
-        key_message(code, plan, "🎁 *Your free key is ready!*"),
+        keystock.key_message(codes, plan, "🎁 *Your free key is ready!*", await keystock.web_url()),
         reply_markup=keyboards.back_to_menu(),
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -209,7 +200,7 @@ async def gift_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     target = SimpleNamespace(id=uid, username=username)
     try:
-        code = await grant_key(
+        codes = await grant_key(
             context.bot, target, plan, method="gift", extra={"gifted_by": update.effective_user.id}
         )
     except OutOfStock:
@@ -227,16 +218,17 @@ async def gift_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         await context.bot.send_message(
             chat_id=uid,
-            text=key_message(code, plan, "🎁 *You received a free key!*"),
+            text=keystock.key_message(codes, plan, "🎁 *You received a free key!*", await keystock.web_url()),
             parse_mode=ParseMode.MARKDOWN,
         )
     except TelegramError as e:
         delivered = False
         log.warning("gift DM to %s failed: %s", uid, e)
 
-    note = "" if delivered else "\n⚠️ I couldn't message them (they may have blocked the bot) — send them the code yourself."
+    note = "" if delivered else "\n⚠️ I couldn't message them (they may have blocked the bot) — send them the key(s) yourself."
+    shown = ", ".join(f"`{c}`" if not delivered else f"`{keystock.mask(c)}`" for c in codes)
     await q.edit_message_text(
-        f"✅ Gift key created for {_tag(uid, username)}.\nCode: `{code}`{note}",
+        f"✅ Gift key created for {_tag(uid, username)}.\nKey(s): {shown}{note}",
         reply_markup=keyboards.admin_back(),
         parse_mode=ParseMode.MARKDOWN,
     )

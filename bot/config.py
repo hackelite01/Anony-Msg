@@ -79,14 +79,18 @@ UPI_MAX_PENDING_PER_USER = 3
 # Colored buttons (Bot API 9.4). Set BUTTON_STYLES=false to show plain grey buttons.
 BUTTON_STYLES = os.getenv("BUTTON_STYLES", "true").strip().lower() in ("1", "true", "yes")
 
-SMS_PER_PROVIDER_KEY = 5
+# Web keys are handed out one per this many SMS (a 10-SMS plan -> 2 keys at 5).
+# Set it to what one key on your website can send.
+SMS_PER_PROVIDER_KEY = int(os.getenv("SMS_PER_KEY", "5"))
+# The website users send SMS from (also settable in /admin -> Settings -> Website URL).
+WEB_SMS_URL = os.getenv("WEB_SMS_URL", "").strip()
 SMS_API_TIMEOUT = 10
 
 WELCOME_TEXT = (
     "👋 *Welcome to Anonymous SMS Bot*\n\n"
     "Send anonymous SMS worldwide using prepaid keys.\n\n"
     "1. Buy a key (pay with Telegram Stars ⭐, crypto or UPI)\n"
-    "2. Use the key to send SMS\n"
+    "2. Paste the key on our website to send SMS\n"
     "3. Each plan has a fixed SMS limit\n\n"
     "Join our channel below, then verify membership to continue."
 )
@@ -97,9 +101,9 @@ HELP_TEXT = (
     "• `/menu` — open main menu\n"
     "• `/cancel` — cancel current operation\n\n"
     "*Buying a key:* tap 🛒 Buy Key, choose a plan, then pick a payment method.\n"
-    "*Sending SMS:* tap 📤 Send SMS, choose a key, enter number then message.\n"
-    "*Your keys:* tap 🗝 My Keys to see remaining SMS.\n\n"
-    "Numbers must include country code (digits only, 10–15 digits).\n"
+    "*Sending SMS:* copy your key from 🗝 My Keys and paste it on our website.\n"
+    "*Your keys:* tap 🗝 My Keys to see and copy them.\n\n"
+    "On the website enter numbers in international format, e.g. +14155550123.\n"
 )
 
 

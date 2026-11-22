@@ -316,3 +316,20 @@ has free keys (otherwise the user/admin gets an "out of stock" message and nothi
     when the payment is confirmed (a payment already in progress is honoured even if the code ran out).
   * Wrong guesses are rate-limited (8 per 10 minutes per user) and a code restricted to another user looks
     exactly like an invalid one.
+
+## Keys: the bot sells website keys
+
+The **website** holds the real SMS provider keys and does all the sending. The bot never sees a real key and
+does not talk to the website — it only sells the *identifiers* of keys you created there.
+
+1. On the website admin, create a key (real key + identifier, e.g. `QSMS-K7M2P-9XQ4T-W3HDN-RB8FA`).
+2. In the bot: `/admin` -> Key Stock -> Add Keys, and send only the identifier(s), one per line
+   (optionally `IDENTIFIER|NOTE`, the note is just for you). Identifiers are 16–64 letters/digits/`-`/`_`.
+   The bot deletes your message afterwards and shows identifiers masked everywhere (admin lists, log channel).
+3. A buyer receives the identifier(s) itself. A plan gets one identifier per `SMS_PER_KEY` SMS (default 5, so a
+   10-SMS plan delivers 2 identifiers). Set `SMS_PER_KEY` to what one key on your website can send.
+4. The buyer copies the identifier and pastes it on the website. Set the website address in
+   `/admin` -> Settings -> Website URL (or `WEB_SMS_URL`) so the Send SMS button and key messages link to it.
+
+Old stock entries from the previous setup (real API keys without an identifier) are ignored.
+Usage is tracked on the website, not in the bot.

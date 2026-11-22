@@ -1,5 +1,6 @@
 """/admin panel — restricted to ADMIN_USER_IDS."""
 import logging
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -15,6 +16,7 @@ from telegram.ext import (
 
 import config
 from services import btc, db, payments, ton
+from services import keys as keystock
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ SET_PLAN_TON = 32
 SET_BTC = 33
 SET_UPI = 34
 SET_PLAN_PRICE = 35
+SET_WEB_URL = 36
 
 
 def _admin_only(func):
@@ -95,8 +98,6 @@ async def on_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    sent = await db.count_logs("sent")
-    failed = await db.count_logs("failed")
     revenue = await db.total_revenue_stars()
     revenue_ton = await db.total_revenue_ton_nano()
     revenue_btc = await db.total_revenue_method("btc", "btc_amount_sats")
@@ -104,7 +105,7 @@ async def on_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ton_part = f" + *{ton.fmt_ton(revenue_ton)} TON*" if revenue_ton else ""
     ton_part += f" + *{btc.fmt_btc(revenue_btc)} BTC*" if revenue_btc else ""
     ton_part += f" + *₹{payments.fmt_inr(revenue_inr)}*" if revenue_inr else ""
-    active_keys = await db.count_active_keys()
+    issued = await db.count_user_keys()
     pool = await db.pool_status()
 
     if pool["free"] == 0:
@@ -116,10 +117,8 @@ async def on_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = (
         "📊 *Stats*\n\n"
-        f"📨 SMS sent: *{sent}*\n"
-        f"❌ SMS failed: *{failed}*\n"
         f"💰 Revenue: *{revenue}⭐*{ton_part}\n"
-        f"🔑 Active user keys: *{active_keys}*\n"
+        f"🔑 Keys sold: *{issued}*\n"
         f"🏊 Pool: {light} — {pool['free']} free / {pool['total']} total"
     )
     await q.edit_message_text(text, reply_markup=keyboards.admin_back(), parse_mode=ParseMode.MARKDOWN)
@@ -132,33 +131,30 @@ async def on_pk(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
     await q.edit_message_text(
-        "🗄 *Provider Keys*",
+        "🗄 *Key Stock*",
         reply_markup=keyboards.admin_pk_menu(),
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+def _plain(text: str) -> str:
+    """Strip characters legacy Markdown would treat as formatting."""
+    return "".join(ch for ch in text if ch not in "_*`[]")
 
 
 @_admin_only
 async def on_pk_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    keys = await db.list_provider_keys(limit=30)
-    if not keys:
-        await q.edit_message_text(
-            "No provider keys yet.", reply_markup=keyboards.admin_pk_menu()
-        )
+    items = await db.list_provider_keys(limit=30)
+    if not items:
+        await q.edit_message_text("No keys in stock yet.", reply_markup=keyboards.admin_pk_menu())
         return
-    lines = ["🗄 *Provider Keys* (latest 30)\n"]
-    for k in keys:
-        if k.get("exhausted"):
-            status = "🟥 exhausted"
-        elif k.get("reserved"):
-            status = f"🟨 reserved → {k.get('reserved_for') or '?'}"
-        else:
-            status = "🟩 free"
-        lines.append(
-            f"`{str(k['_id'])[-6:]}` | {k.get('label', '?')} | {k['sms_used']}/{k['sms_capacity']} | {status}"
-        )
+    lines = ["🗄 *Key Stock* (oldest 30)\n"]
+    for k in items:
+        status = "🟨 sold" if k.get("reserved") else "🟩 free"
+        note = f" | {_plain(k['label'])}" if k.get("label") else ""
+        lines.append(f"`{keystock.mask(k['identifier'])}`{note} | {status}")
     await q.edit_message_text(
         "\n".join(lines), reply_markup=keyboards.admin_pk_menu(), parse_mode=ParseMode.MARKDOWN
     )
@@ -175,14 +171,19 @@ async def on_pk_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         light = "🟡"
     else:
         light = "🟢"
-    await q.edit_message_text(
-        f"{light} *Pool Status*\n\n"
+    text = (
+        f"{light} *Key Stock*\n\n"
         f"Total: {p['total']}\n"
         f"Free: {p['free']}\n"
-        f"Reserved: {p['reserved']}\n"
-        f"Exhausted: {p['exhausted']}",
-        reply_markup=keyboards.admin_pk_menu(),
-        parse_mode=ParseMode.MARKDOWN,
+        f"Sold: {p['reserved']}"
+    )
+    if p["legacy"]:
+        text += (
+            f"\n\n⚠️ {p['legacy']} old entr{'y' if p['legacy'] == 1 else 'ies'} without an "
+            "identifier are ignored (they hold real API keys from the previous setup)."
+        )
+    await q.edit_message_text(
+        text, reply_markup=keyboards.admin_pk_menu(), parse_mode=ParseMode.MARKDOWN
     )
 
 
@@ -191,15 +192,16 @@ async def add_keys_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     q = update.callback_query
     await q.answer()
     await q.edit_message_text(
-        "➕ *Add Provider Keys*\n\n"
-        "Send me keys, one per line, in this format:\n"
-        "`LABEL|SEVEN_IO_KEY`\n\n"
+        "➕ *Add Keys to stock*\n\n"
+        "First create the key on your website (real key + identifier). Then send me only the "
+        "*identifier* — one per line, optionally with a note for yourself:\n"
+        "`IDENTIFIER` or `IDENTIFIER|NOTE`\n\n"
         "Example:\n"
         "```\n"
-        "Key47|abc123apikey\n"
-        "Key48|def456apikey\n"
-        "```\n\n"
-        "Or /cancel.",
+        "QSMS-K7M2P-9XQ4T-W3HDN-RB8FA|key1\n"
+        "QSMS-AB3CD-EF4GH-JK5LM-NP6QR\n"
+        "```\n"
+        "I never need the real key. /cancel to abort.",
         parse_mode=ParseMode.MARKDOWN,
     )
     return ADD_KEYS_INPUT
@@ -210,35 +212,51 @@ async def add_keys_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     raw = update.message.text or ""
     items: list[tuple[str, str]] = []
     bad: list[str] = []
+    seen: set[str] = set()
     for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
-        if "|" not in line:
-            bad.append(line)
+        ident, _, note = line.partition("|")
+        ident, note = ident.strip(), note.strip()[:40]
+        if not keystock.is_valid_identifier(ident):
+            bad.append(ident)
             continue
-        label, key = line.split("|", 1)
-        label = label.strip()
-        key = key.strip()
-        if not label or not key:
-            bad.append(line)
+        if ident in seen:
             continue
-        items.append((label, key))
+        seen.add(ident)
+        items.append((ident, note))
 
+    rule = "An identifier is 16–64 letters, digits, - or _, exactly as it appears on the website."
     if not items:
+        hint = ""
+        if bad and any(len(b) < 16 for b in bad):
+            hint = "\n\nLooks like a short name or the old LABEL|API-KEY format? Send the web *identifier* instead."
         await update.message.reply_text(
-            "❌ No valid lines found. Send `LABEL|KEY` per line, or /cancel.",
+            f"❌ No valid identifiers found. {rule}{hint}\n\nTry again or /cancel.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return ADD_KEYS_INPUT
 
-    added = await db.add_provider_keys(items)
+    added, dupes = await db.add_provider_keys(items)
     if added:
         await activity_log.provider_keys_added(context, update.effective_user, added)
-    msg = f"✅ Added {added} key(s)."
+
+    deleted = False
+    try:  # don't leave the identifiers sitting in the chat
+        await update.message.delete()
+        deleted = True
+    except TelegramError:
+        pass
+
+    msg = f"✅ Added {added} key(s) to stock."
+    if dupes:
+        msg += f"\n⚠️ {len(dupes)} already in stock (skipped)."
     if bad:
-        msg += f"\n⚠️ Skipped {len(bad)} invalid line(s)."
-    await update.message.reply_text(msg, reply_markup=keyboards.admin_pk_menu())
+        msg += f"\n⚠️ Skipped {len(bad)} invalid line(s). {rule}"
+    if deleted:
+        msg += "\n🧹 I deleted your message so the identifiers don't stay in the chat."
+    await update.effective_chat.send_message(msg, reply_markup=keyboards.admin_pk_menu())
     return ConversationHandler.END
 
 
@@ -779,10 +797,13 @@ async def on_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def _render_settings(q, context):
     cfg = await db.get_config()
+    web = (cfg.get("web_url") or config.WEB_SMS_URL or "").strip()
+    web_line = f"`{web}`" if web else "*—*"
     text = (
         "⚙️ *Settings*\n\n"
         f"Auto-Approve: *{'ON' if cfg.get('auto_approve') else 'OFF'}*\n"
-        f"Admin Username: *{cfg.get('admin_username') or '—'}*\n\n"
+        f"Admin Username: *{cfg.get('admin_username') or '—'}*\n"
+        f"Website: {web_line}\n\n"
         "Payment methods are under 💳 Payment Methods."
     )
     await q.edit_message_text(
@@ -1006,6 +1027,38 @@ async def set_upi_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
+@_admin_only
+async def set_web_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "Send the address of your website where users send SMS (https://…), or 'clear'. "
+        "/cancel to abort."
+    )
+    return SET_WEB_URL
+
+
+async def set_web_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = (update.message.text or "").strip()
+    if raw.lower() == "clear":
+        await db.update_config(web_url=None)
+        await update.message.reply_text("✅ Website address cleared.", reply_markup=keyboards.admin_back())
+        return ConversationHandler.END
+    if not re.match(r"^https?://[^\s]{3,200}$", raw):
+        await update.message.reply_text(
+            "❌ Send a full address starting with http:// or https:// (no spaces). "
+            "Try again or /cancel."
+        )
+        return SET_WEB_URL
+    await db.update_config(web_url=raw)
+    await update.message.reply_text(
+        f"✅ Website saved: `{raw}`",
+        reply_markup=keyboards.admin_back(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return ConversationHandler.END
+
+
 # ---------- shared cancel ----------
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1167,6 +1220,17 @@ def register(app) -> None:
             states={SET_PLAN_PRICE: text_state(set_plan_price_save)},
             fallbacks=[CommandHandler("cancel", cancel)],
             name="admin_set_plan_price",
+            persistent=False,
+        )
+    )
+
+    # Conversation: website URL
+    app.add_handler(
+        ConversationHandler(
+            entry_points=[CallbackQueryHandler(set_web_start, pattern=r"^adm:settings:set_web$")],
+            states={SET_WEB_URL: text_state(set_web_save)},
+            fallbacks=[CommandHandler("cancel", cancel)],
+            name="admin_set_web",
             persistent=False,
         )
     )

@@ -7,6 +7,7 @@ from telegram.error import BadRequest
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 from services import db
+from services import keys as keystock
 from utils import keyboards
 
 log = logging.getLogger(__name__)
@@ -24,13 +25,10 @@ async def show_my_keys(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         lines = ["🗝 *Your Keys*\n"]
         for k in keys:
-            status = "✅ Active" if k.get("active") else "❌ Exhausted"
-            lines.append(
-                f"🔑 `{k['code']}` | {k['plan_name']} | "
-                f"{k['sms_used']}/{k['sms_limit']} SMS | {status}"
-            )
+            lines.append(f"🔑 `{k['code']}`\n    {k['plan_name']} • up to {k['sms_limit']} SMS")
+        lines.append("\nCopy a key and paste it on our website to send SMS. Usage is shown there.")
         body = "\n".join(lines)
-        markup = keyboards.back_to_menu()
+        markup = keyboards.web_actions(await keystock.web_url(), show_keys=False)
 
     if update.callback_query:
         await update.callback_query.answer()

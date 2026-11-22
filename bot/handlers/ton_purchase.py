@@ -29,6 +29,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 import config
 from handlers import purchase
 from services import db, promo, ton
+from services import keys as keystock
 from utils import activity_log, keyboards
 
 log = logging.getLogger(__name__)
@@ -287,7 +288,7 @@ async def _fulfill_order(bot, order: dict) -> None:
 
     if pool_ok and cfg.get("auto_approve"):
         try:
-            code = await purchase.assign_key_for_request(ctx, user, request, plan)
+            codes = await purchase.assign_key_for_request(ctx, user, request, plan)
         except Exception:
             log.exception("TON auto-fulfil failed for order %s", order["_id"])
             await _notify_user(
@@ -298,11 +299,7 @@ async def _fulfill_order(bot, order: dict) -> None:
         await _notify_user(
             bot,
             uid,
-            f"🎉 *Your key is ready!*\n\n"
-            f"Code: `{code}`\n"
-            f"Plan: {plan['name']}\n"
-            f"SMS: {plan['sms_limit']} sends\n\n"
-            "Use /menu to start sending.",
+            keystock.key_message(codes, plan, "🎉 *Your key is ready!*", await keystock.web_url()),
             keyboards.back_to_menu(),
             markdown=True,
         )

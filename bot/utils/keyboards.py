@@ -143,6 +143,18 @@ def contact_admin_button(admin_username: str | None) -> InlineKeyboardMarkup:
     return _markup(*rows)
 
 
+def web_actions(url: str | None, show_keys: bool = True) -> InlineKeyboardMarkup:
+    """Where to send SMS: a button to the website (when configured) plus navigation."""
+    rows = []
+    if url:
+        rows.append([btn("🌐 Open website", url=url, style=PRIMARY)])
+    nav = [_home()]
+    if show_keys:
+        nav.insert(0, btn("🗝 My Keys", "menu:mykeys"))
+    rows.append(nav)
+    return _markup(*rows)
+
+
 # ---------- user: buying ----------
 
 def plans_keyboard(plans: list[dict]) -> InlineKeyboardMarkup:
@@ -245,7 +257,7 @@ def admin_reject_reasons(req_id: str) -> InlineKeyboardMarkup:
 def admin_main() -> InlineKeyboardMarkup:
     return _markup(
         [btn("👥 Users", "adm:users"), btn("📊 Stats", "adm:stats")],
-        [btn("🗄 Provider Keys", "adm:pk"), btn("📋 Plans", "adm:plans")],
+        [btn("🗄 Key Stock", "adm:pk"), btn("📋 Plans", "adm:plans")],
         [btn("🔑 Pending", "adm:pending", style=PRIMARY), btn("📜 Logs", "adm:logs:0")],
         [btn("🎁 Gift Key", "adm:gift"), btn("🎟 Promo Codes", "adm:promo")],
         [btn("📢 Broadcast", "adm:broadcast"), btn("⚙️ Settings", "adm:settings")],
@@ -259,7 +271,7 @@ def admin_back() -> InlineKeyboardMarkup:
 def admin_pk_menu() -> InlineKeyboardMarkup:
     return _markup(
         [btn("📋 List Keys", "adm:pk:list"), btn("➕ Add Keys", "adm:pk:add", style=SUCCESS)],
-        [btn("🏊 Pool Status", "adm:pk:pool")],
+        [btn("📦 Stock Status", "adm:pk:pool")],
         [_admin_home()],
     )
 
@@ -307,6 +319,7 @@ def admin_settings(cfg: dict) -> InlineKeyboardMarkup:
             btn("💳 Payment Methods", "adm:pay", style=PRIMARY),
             btn("📱 Admin Username", "adm:settings:set_admin_user"),
         ],
+        [btn("🌐 Website URL", "adm:settings:set_web")],
         [_admin_home()],
     )
 

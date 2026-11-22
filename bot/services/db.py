@@ -39,6 +39,12 @@ async def init_db() -> AsyncIOMotorDatabase:
     await _db.provider_keys.create_index(
         [("reserved", ASCENDING), ("exhausted", ASCENDING)]
     )
+    # key stock: each web identifier can be in stock only once
+    await _db.provider_keys.create_index(
+        [("identifier", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"identifier": {"$type": "string"}},
+    )
     await _db.purchase_requests.create_index([("status", ASCENDING)])
     await _db.logs.create_index([("timestamp", ASCENDING)])
     await _db.ton_orders.create_index([("memo", ASCENDING)], unique=True)
@@ -256,119 +262,115 @@ async def deactivate_plan(plan_id: str | ObjectId) -> bool:
     return res.modified_count > 0
 
 
-# ---------- provider_keys ----------
+# ---------- key stock (identifiers of keys that live on the website) ----------
+# Collection name kept as `provider_keys`. Old entries from the previous setup (real API keys,
+# no `identifier` field) are ignored by every query below.
 
-async def add_provider_keys(items: list[tuple[str, str]]) -> int:
-    if not items:
-        return 0
-    docs = [
-        {
-            "seven_io_key": k,
-            "label": label,
-            "sms_capacity": config.SMS_PER_PROVIDER_KEY,
-            "sms_used": 0,
-            "exhausted": False,
-            "reserved": False,
-            "reserved_for": None,
-            "added_at": now_utc(),
-        }
-        for label, k in items
-    ]
-    res = await get_db().provider_keys.insert_many(docs)
-    return len(res.inserted_ids)
+_HAS_IDENTIFIER = {"identifier": {"$type": "string"}}
+
+
+async def add_provider_keys(items: list[tuple[str, str]]) -> tuple[int, list[str]]:
+    """Add stock. items = (identifier, label). Returns (added, duplicate identifiers)."""
+    added, dupes = 0, []
+    for identifier, label in items:
+        try:
+            await get_db().provider_keys.insert_one(
+                {
+                    "identifier": identifier,
+                    "label": label,
+                    "sms_capacity": config.SMS_PER_PROVIDER_KEY,
+                    "sms_used": 0,
+                    "exhausted": False,
+                    "reserved": False,
+                    "reserved_for": None,
+                    "added_at": now_utc(),
+                }
+            )
+            added += 1
+        except DuplicateKeyError:
+            dupes.append(identifier)
+    return added, dupes
 
 
 async def list_provider_keys(limit: int = 50) -> list[dict]:
-    cur = get_db().provider_keys.find({}).sort("added_at", ASCENDING).limit(limit)
+    cur = get_db().provider_keys.find(_HAS_IDENTIFIER).sort("added_at", ASCENDING).limit(limit)
     return [d async for d in cur]
 
 
 async def pool_status() -> dict:
-    db = get_db()
-    total = await db.provider_keys.count_documents({})
-    free = await db.provider_keys.count_documents({"reserved": False, "exhausted": False})
-    reserved = await db.provider_keys.count_documents({"reserved": True, "exhausted": False})
-    exhausted = await db.provider_keys.count_documents({"exhausted": True})
-    return {"total": total, "free": free, "reserved": reserved, "exhausted": exhausted}
+    d = get_db()
+    total = await d.provider_keys.count_documents(_HAS_IDENTIFIER)
+    free = await d.provider_keys.count_documents(
+        {**_HAS_IDENTIFIER, "reserved": False, "exhausted": False}
+    )
+    sold = await d.provider_keys.count_documents({**_HAS_IDENTIFIER, "reserved": True})
+    legacy = await d.provider_keys.count_documents({"identifier": {"$exists": False}})
+    return {"total": total, "free": free, "reserved": sold, "legacy": legacy}
 
 
 async def free_keys_count() -> int:
     return await get_db().provider_keys.count_documents(
-        {"reserved": False, "exhausted": False}
+        {**_HAS_IDENTIFIER, "reserved": False, "exhausted": False}
     )
 
 
-async def reserve_keys_for(user_key_code: str, count: int) -> list[ObjectId]:
-    """Atomically reserve `count` free keys. Returns ids of reserved keys.
-    Releases reservations on partial failure."""
-    db = get_db()
-    reserved_ids: list[ObjectId] = []
+async def reserve_keys_for(reserved_for: str, count: int) -> list[dict]:
+    """Atomically reserve `count` free stock keys; returns their documents.
+    Releases everything it reserved if the stock runs out part-way."""
+    coll = get_db().provider_keys
+    reserved: list[dict] = []
     try:
         for _ in range(count):
-            doc = await db.provider_keys.find_one_and_update(
-                {"reserved": False, "exhausted": False},
-                {"$set": {"reserved": True, "reserved_for": user_key_code}},
+            doc = await coll.find_one_and_update(
+                {**_HAS_IDENTIFIER, "reserved": False, "exhausted": False},
+                {"$set": {"reserved": True, "reserved_for": reserved_for}},
             )
             if not doc:
-                raise RuntimeError("Pool drained mid-reservation")
-            reserved_ids.append(doc["_id"])
-        return reserved_ids
+                raise RuntimeError("Key stock ran out mid-reservation")
+            reserved.append(doc)
+        return reserved
     except Exception:
-        if reserved_ids:
-            await db.provider_keys.update_many(
-                {"_id": {"$in": reserved_ids}},
-                {"$set": {"reserved": False, "reserved_for": None}},
-            )
+        await release_reserved([d["_id"] for d in reserved])
         raise
+
+
+async def release_reserved(ids: list[ObjectId]) -> None:
+    if ids:
+        await get_db().provider_keys.update_many(
+            {"_id": {"$in": ids}}, {"$set": {"reserved": False, "reserved_for": None}}
+        )
 
 
 async def get_provider_key(pk_id: ObjectId) -> Optional[dict]:
     return await get_db().provider_keys.find_one({"_id": pk_id})
 
 
-async def increment_provider_key_usage(pk_id: ObjectId) -> dict:
-    """Increment sms_used and mark exhausted if at capacity. Returns updated doc."""
-    db = get_db()
-    doc = await db.provider_keys.find_one_and_update(
-        {"_id": pk_id},
-        {"$inc": {"sms_used": 1}},
-        return_document=True,
-    )
-    if doc and doc["sms_used"] >= doc.get("sms_capacity", config.SMS_PER_PROVIDER_KEY):
-        doc = await db.provider_keys.find_one_and_update(
-            {"_id": pk_id},
-            {"$set": {"exhausted": True}},
-            return_document=True,
-        )
-    return doc
-
-
-# ---------- user_keys ----------
+# ---------- user_keys (what each buyer owns: one record per identifier) ----------
 
 async def code_exists(code: str) -> bool:
     return await get_db().user_keys.count_documents({"code": code}, limit=1) > 0
 
 
-async def create_user_key(
-    code: str,
-    telegram_id: int,
-    plan: dict,
-    reserved_key_ids: list[ObjectId],
-) -> dict:
-    doc = {
-        "code": code,
-        "telegram_id": telegram_id,
-        "plan_id": plan["_id"],
-        "plan_name": plan["name"],
-        "sms_limit": plan["sms_limit"],
-        "sms_used": 0,
-        "reserved_key_ids": reserved_key_ids,
-        "active_provider_key_index": 0,
-        "active": True,
-        "assigned_at": now_utc(),
-    }
-    await get_db().user_keys.insert_one(doc)
-    return doc
+async def create_user_keys(telegram_id: int, plan: dict, stock_docs: list[dict]) -> list[str]:
+    """Record the identifiers handed to a buyer. Returns the identifiers."""
+    now = now_utc()
+    docs = [
+        {
+            "code": s["identifier"],
+            "telegram_id": telegram_id,
+            "plan_id": plan["_id"],
+            "plan_name": plan["name"],
+            "sms_limit": s.get("sms_capacity", config.SMS_PER_PROVIDER_KEY),
+            "plan_sms_limit": plan["sms_limit"],
+            "reserved_key_ids": [s["_id"]],
+            "active": True,
+            "assigned_at": now,
+        }
+        for s in stock_docs
+    ]
+    if docs:
+        await get_db().user_keys.insert_many(docs)
+    return [d["code"] for d in docs]
 
 
 async def list_user_keys(telegram_id: int, active_only: bool = False) -> list[dict]:
@@ -410,6 +412,10 @@ async def advance_user_key_provider(code: str) -> dict:
 
 async def count_active_keys() -> int:
     return await get_db().user_keys.count_documents({"active": True})
+
+
+async def count_user_keys() -> int:
+    return await get_db().user_keys.count_documents({})
 
 
 # ---------- purchase_requests ----------

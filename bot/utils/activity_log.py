@@ -12,6 +12,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import config
+from services import keys as keystock
 from services.btc import fmt_btc_exact
 from services.payments import fmt_inr
 from services.ton import fmt_ton
@@ -29,6 +30,11 @@ def _user_tag(user: Any) -> str:
         uname = getattr(user, "username", None)
         uid = getattr(user, "id", None)
     return f"@{uname}" if uname else f"id={uid}"
+
+
+def _codes(code) -> str:
+    """Identifiers are credentials: logs only ever show them masked."""
+    return ", ".join(f"`{keystock.mask(c)}`" for c in keystock.as_list(code))
 
 
 async def post(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
@@ -124,7 +130,7 @@ async def grant_given(context, user, code: str, plan_name: str, sms_limit: int, 
         context,
         f"{label} *key granted*\n"
         f"User: {_user_tag(user)}\n"
-        f"Code: `{code}`\n"
+        f"Key: {_codes(code)}\n"
         f"Plan: {plan_name} ({sms_limit} SMS)",
     )
 
@@ -134,7 +140,7 @@ async def key_assigned(context, user, code: str, plan_name: str, sms_limit: int,
         context,
         f"🔑 *Key assigned* {'(auto)' if auto else '(manual)'}\n"
         f"User: {_user_tag(user)}\n"
-        f"Code: `{code}`\n"
+        f"Key: {_codes(code)}\n"
         f"Plan: {plan_name} ({sms_limit} SMS)",
     )
 
